@@ -65,7 +65,7 @@ SYMPTOM_SCENARIOS = [
         ),
         "offset_attr": "bleeding_symptom_offset_days",
         "observation": (
-            "Não é uma terceira categoria oficial separada de 'seco' e 'úmido'. Usar quando a data disponível "
+            "Não é uma terceira categoria oficial separada de sintomas secos e úmidos. Usar quando a data disponível "
             "na investigação for o início de sangramento ou manifestação hemorrágica."
         ),
     },
@@ -122,6 +122,15 @@ def coerce_date(value) -> date | None:
 def fmt_br(value) -> str:
     dt = coerce_date(value)
     return dt.strftime("%d/%m/%Y") if dt else ""
+
+
+def format_date_columns_br(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    formatted = df.copy()
+    for col in columns:
+        if col in formatted.columns:
+            formatted[col] = pd.to_datetime(formatted[col], errors="coerce").dt.strftime("%d/%m/%Y")
+            formatted[col] = formatted[col].replace("NaT", "")
+    return formatted
 
 
 # ============================================================
@@ -672,6 +681,7 @@ def render_inputs() -> tuple[date, date, bool, date | None]:
         symptom_report_date = st.date_input(
             "Data informada relacionada aos sintomas",
             value=date.today(),
+            format="DD/MM/YYYY",
             help=(
                 "A ferramenta calcula automaticamente: sintomas secos/iniciais, sintomas úmidos/tardios e "
                 "sangramento como subcategoria operacional."
@@ -681,6 +691,7 @@ def render_inputs() -> tuple[date, date, bool, date | None]:
         transmission_end = st.date_input(
             "Data final para busca de contatos",
             value=date.today(),
+            format="DD/MM/YYYY",
             help="Use a data de isolamento, óbito, sepultamento seguro, último contato possível ou encerramento da investigação.",
         )
     with c3:
@@ -691,7 +702,7 @@ def render_inputs() -> tuple[date, date, bool, date | None]:
         )
         death_date = None
         if include_death:
-            death_date = st.date_input("Data de óbito", value=date.today())
+            death_date = st.date_input("Data de óbito", value=date.today(), format="DD/MM/YYYY")
 
     return symptom_report_date, transmission_end, include_death, death_date
 
@@ -707,7 +718,6 @@ def render_scenarios(results: list[ScenarioResult], params: CalculatorParams) ->
 
     df = scenario_results_to_df(results)
 
-    display_df = df.copy()
     date_cols = [
         "data informada",
         "início estimado dos sintomas",
@@ -716,9 +726,8 @@ def render_scenarios(results: list[ScenarioResult], params: CalculatorParams) ->
         "início da janela transmissível",
         "fim operacional da janela transmissível",
     ]
-    for col in date_cols:
-        display_df[col] = pd.to_datetime(display_df[col]).dt.strftime("%d/%m/%Y")
 
+    display_df = format_date_columns_br(df, date_cols)
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
     timeline = make_timeline_df(results)
@@ -735,7 +744,8 @@ def render_scenarios(results: list[ScenarioResult], params: CalculatorParams) ->
     st.plotly_chart(fig, use_container_width=True)
 
     payload = to_iso_payload(results, params)
-    csv_data = df.to_csv(index=False).encode("utf-8-sig")
+    csv_df = display_df.copy()
+    csv_data = csv_df.to_csv(index=False).encode("utf-8-sig")
     json_data = json.dumps(payload, ensure_ascii=False, indent=2)
 
     d1, d2 = st.columns(2)
@@ -749,10 +759,11 @@ def render_scenarios(results: list[ScenarioResult], params: CalculatorParams) ->
         )
     with d2:
         st.download_button(
-            "Baixar janelas em JSON",
+            "Baixar janelas em JSON técnico",
             data=json_data,
             file_name="calculadora_ebola_janelas.json",
             mime="application/json",
+            help="O JSON permanece em formato ISO AAAA-MM-DD para interoperabilidade técnica.",
             use_container_width=True,
         )
 
@@ -840,18 +851,13 @@ def render_contacts_analysis(
     m3.metric("Requer avaliação/ação", int(action))
     m4.metric("Concluídos/encerrados", int(completed))
 
-    display = evaluated.copy()
     date_cols = [
         "data do último contato",
         "monitorar até",
         "data de início dos sintomas",
         "data da última avaliação",
     ]
-    for col in date_cols:
-        if col in display.columns:
-            display[col] = pd.to_datetime(display[col], errors="coerce").dt.strftime("%d/%m/%Y")
-            display[col] = display[col].replace("NaT", "")
-
+    display = format_date_columns_br(evaluated, date_cols)
     st.dataframe(display, use_container_width=True, hide_index=True)
 
     timeline = make_contacts_timeline(evaluated)
@@ -868,9 +874,10 @@ def render_contacts_analysis(
         fig.update_layout(height=380, margin=dict(l=20, r=20, t=35, b=20), legend_title_text="Fase")
         st.plotly_chart(fig, use_container_width=True)
 
+    export_df = display.copy()
     st.download_button(
         "Baixar relação de contatos monitorados em CSV",
-        data=evaluated.to_csv(index=False).encode("utf-8-sig"),
+        data=export_df.to_csv(index=False).encode("utf-8-sig"),
         file_name="calculadora_ebola_contatos_monitoramento.csv",
         mime="text/csv",
         use_container_width=True,
@@ -1046,15 +1053,13 @@ def render_chain_section(contacts_df: pd.DataFrame) -> None:
 
     edges = make_chain_edges(contacts_df)
     st.markdown("#### Relação de vínculos da cadeia")
-    display_edges = edges.copy()
+    display_edges = format_date_columns_br(edges, ["data do contato"])
     if not display_edges.empty:
-        display_edges["data do contato"] = pd.to_datetime(display_edges["data do contato"], errors="coerce").dt.strftime("%d/%m/%Y")
-        display_edges["data do contato"] = display_edges["data do contato"].replace("NaT", "")
         st.dataframe(display_edges, use_container_width=True, hide_index=True)
 
         st.download_button(
             "Baixar vínculos da cadeia em CSV",
-            data=edges.to_csv(index=False).encode("utf-8-sig"),
+            data=display_edges.to_csv(index=False).encode("utf-8-sig"),
             file_name="calculadora_ebola_cadeia_transmissao.csv",
             mime="text/csv",
             use_container_width=True,
@@ -1078,6 +1083,39 @@ def render_interpretation() -> None:
         **6. Cadeia de transmissão:** o campo “caso-origem” permite desenhar a cadeia provável. Se o contato C002 teve contato com C001, informe C001 como caso-origem de C002.
 
         **7. Limite da ferramenta:** compatibilidade temporal não confirma transmissão. A interpretação final depende de investigação epidemiológica, clínica, laboratório, contexto do surto, exposição real e validação da equipe responsável.
+        """
+    )
+
+    st.markdown(
+        """
+        ### Como as datas são calculadas
+
+        **Caso índice**
+
+        - **Sintomas secos/iniciais:** a data informada é considerada como o início estimado dos sintomas.
+        - **Sintomas úmidos/tardios:** a ferramenta subtrai o número de dias configurado para sintomas úmidos/tardios.
+        - **Sangramento/manifestação hemorrágica:** a ferramenta subtrai o número de dias configurado para sangramento, tratando-o como subcategoria operacional de sintoma úmido/tardio.
+        - **Óbito, quando informado:** a ferramenta subtrai o número de dias configurado entre início dos sintomas e óbito.
+
+        **Janela provável de exposição**
+
+        - Início provável da exposição = início estimado dos sintomas - incubação máxima.
+        - Fim provável da exposição = início estimado dos sintomas - incubação mínima.
+
+        **Janela operacional de transmissibilidade**
+
+        - Início = início estimado dos sintomas.
+        - Fim = data final para busca de contatos informada pelo usuário.
+
+        **Contatos**
+
+        - Possível início de sintomas do contato = data do último contato + incubação mínima até incubação máxima.
+        - Monitorar até = data do último contato + número de dias de monitoramento.
+
+        **Padrão de datas**
+
+        - A interface, as tabelas e os CSVs usam o padrão brasileiro **DD/MM/AAAA**.
+        - O arquivo JSON técnico permanece em **AAAA-MM-DD** para interoperabilidade entre sistemas.
         """
     )
 
