@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 import json
-from typing import Iterable
 
 import pandas as pd
 import plotly.express as px
@@ -12,7 +11,7 @@ import streamlit as st
 
 
 # ============================================================
-# Modelos e parâmetros
+# Modelos, parâmetros e opções
 # ============================================================
 
 @dataclass(frozen=True)
@@ -20,56 +19,31 @@ class CalculatorParams:
     min_incubation_days: int = 4
     max_incubation_days: int = 17
     wet_symptom_offset_days: int = 4
-    bleeding_symptom_offset_days: int = 7
+    severe_alert_offset_days: int = 5
     death_offset_days: int = 10
     contact_monitoring_days: int = 21
 
 
 @dataclass(frozen=True)
-class ScenarioResult:
-    scenario: str
-    basis: str
-    reported_date: date
-    estimated_symptom_onset: date
-    exposure_start: date
-    exposure_end: date
+class CaseCalculation:
+    last_exposure_date: date | None
+    detection_date: date
+    clinical_condition_at_detection: str
+    onset_known: bool
+    symptom_onset_status: str
+    symptom_onset_date: date
+    onset_estimation_method: str
+    exposure_window_start: date
+    exposure_window_end: date
+    symptom_window_from_exposure_start: date | None
+    symptom_window_from_exposure_end: date | None
+    exposure_onset_compatibility: str
+    wet_symptom_alert_date: date
+    severe_alert_date: date
     transmission_start: date
     transmission_end: date
     observation: str
 
-
-SYMPTOM_SCENARIOS = [
-    {
-        "scenario": "Sintomas secos (iniciais)",
-        "basis": "Data informada considerada como início dos sintomas secos/iniciais",
-        "offset_attr": None,
-        "observation": (
-            "Sintomas iniciais inespecíficos, sem perda importante de fluidos corporais: febre, fadiga, "
-            "fraqueza, cefaleia, mialgia/artralgia, dor de garganta e perda de apetite."
-        ),
-    },
-    {
-        "scenario": "Sintomas úmidos (tardios)",
-        "basis": "Data informada ajustada para trás pelo intervalo médio até sintomas úmidos/tardios",
-        "offset_attr": "wet_symptom_offset_days",
-        "observation": (
-            "Sintomas tardios com eliminação de fluidos corporais, como náusea, dor abdominal, diarreia, "
-            "vômitos e/ou sangramento inexplicado."
-        ),
-    },
-    {
-        "scenario": "Sangramento / manifestação hemorrágica",
-        "basis": (
-            "Subcategoria operacional de sintoma úmido/tardio; data informada ajustada para trás pelo "
-            "intervalo médio até sangramento ou manifestação hemorrágica"
-        ),
-        "offset_attr": "bleeding_symptom_offset_days",
-        "observation": (
-            "Não é uma terceira categoria oficial separada de sintomas secos e úmidos. Usar quando a data disponível "
-            "na investigação for o início de sangramento ou manifestação hemorrágica."
-        ),
-    },
-]
 
 EVOLUTION_OPTIONS = [
     "Em monitoramento",
@@ -83,6 +57,20 @@ EVOLUTION_OPTIONS = [
 ]
 
 RISK_OPTIONS = ["Não classificado", "Baixo", "Moderado", "Alto"]
+
+ONSET_STATUS_OPTIONS = [
+    "Data real observada",
+    "Data estimada pela investigação",
+    "Data aproximada/informada indiretamente",
+]
+
+CLINICAL_CONDITION_OPTIONS = [
+    "Sintomas secos/iniciais",
+    "Sintomas úmidos/tardios",
+    "Sinais de gravidade",
+    "Sangramento observado",
+    "Óbito",
+]
 
 
 # ============================================================
@@ -133,8 +121,12 @@ def format_date_columns_br(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame
     return formatted
 
 
+def date_or_none_to_iso(value: date | None) -> str | None:
+    return value.isoformat() if value else None
+
+
 # ============================================================
-# Cálculo de janelas do caso índice
+# Cálculo do caso índice
 # ============================================================
 
 def validate_params(params: CalculatorParams) -> None:
@@ -146,146 +138,229 @@ def validate_params(params: CalculatorParams) -> None:
         )
 
 
-def estimate_onset_from_symptom_date(
-    reported_date: date,
-    scenario_config: dict,
+def estimate_onset_from_detection(
+    detection_date: date,
+    clinical_condition: str,
     params: CalculatorParams,
-) -> date:
-    offset_attr = scenario_config["offset_attr"]
-    if offset_attr is None:
-        return reported_date
-    offset_days = getattr(params, offset_attr)
-    return reported_date - timedelta(days=offset_days)
+) -> tuple[date, str]:
+    if clinical_condition == "Sintomas secos/iniciais":
+        return (
+            detection_date,
+            "Início dos sintomas estimado como a própria data de detecção, pois a condição observada foi de sintomas secos/iniciais.",
+        )
+
+    if clinical_condition == "Sintomas úmidos/tardios":
+        return (
+            detection_date - timedelta(days=params.wet_symptom_offset_days),
+            "Início dos sintomas estimado retrospectivamente a partir da detecção com sintomas úmidos/tardios.",
+        )
+
+    if clinical_condition in ["Sinais de gravidade", "Sangramento observado"]:
+        return (
+            detection_date - timedelta(days=params.severe_alert_offset_days),
+            "Início dos sintomas estimado retrospectivamente a partir da detecção com sinais de gravidade/sangramento observado.",
+        )
+
+    if clinical_condition == "Óbito":
+        return (
+            detection_date - timedelta(days=params.death_offset_days),
+            "Início dos sintomas estimado retrospectivamente a partir da data de óbito.",
+        )
+
+    raise ValueError("Condição clínica na detecção não reconhecida.")
 
 
-def calculate_scenario(
-    scenario: str,
-    basis: str,
-    reported_date: date,
-    estimated_onset: date,
+def calculate_case(
+    last_exposure_date: date | None,
+    detection_date: date,
+    clinical_condition_at_detection: str,
+    onset_known: bool,
+    known_symptom_onset_date: date | None,
+    symptom_onset_status: str,
     transmission_end: date,
-    observation: str,
     params: CalculatorParams,
-) -> ScenarioResult:
-    exposure_start = estimated_onset - timedelta(days=params.max_incubation_days)
-    exposure_end = estimated_onset - timedelta(days=params.min_incubation_days)
+) -> CaseCalculation:
+    validate_params(params)
 
-    return ScenarioResult(
-        scenario=scenario,
-        basis=basis,
-        reported_date=reported_date,
-        estimated_symptom_onset=estimated_onset,
-        exposure_start=exposure_start,
-        exposure_end=exposure_end,
-        transmission_start=estimated_onset,
+    if onset_known:
+        if known_symptom_onset_date is None:
+            raise ValueError("Informe a data de início dos sintomas quando marcar início conhecido.")
+        symptom_onset_date = known_symptom_onset_date
+        onset_estimation_method = (
+            "Data de início dos sintomas informada diretamente como real, estimada ou aproximada pela investigação."
+        )
+    else:
+        symptom_onset_date, onset_estimation_method = estimate_onset_from_detection(
+            detection_date=detection_date,
+            clinical_condition=clinical_condition_at_detection,
+            params=params,
+        )
+        symptom_onset_status = "Estimado retrospectivamente pela condição clínica na detecção"
+
+    exposure_window_start = symptom_onset_date - timedelta(days=params.max_incubation_days)
+    exposure_window_end = symptom_onset_date - timedelta(days=params.min_incubation_days)
+
+    symptom_window_from_exposure_start = None
+    symptom_window_from_exposure_end = None
+    compatibility = "Não avaliado: data da última exposição não informada."
+
+    if last_exposure_date is not None:
+        symptom_window_from_exposure_start = last_exposure_date + timedelta(days=params.min_incubation_days)
+        symptom_window_from_exposure_end = last_exposure_date + timedelta(days=params.max_incubation_days)
+
+        if symptom_window_from_exposure_start <= symptom_onset_date <= symptom_window_from_exposure_end:
+            compatibility = "Compatível: início dos sintomas dentro da janela esperada após a última exposição."
+        else:
+            compatibility = "Fora da janela esperada: revisar data de exposição, data de sintomas ou parâmetros."
+
+    wet_symptom_alert_date = symptom_onset_date + timedelta(days=params.wet_symptom_offset_days)
+    severe_alert_date = symptom_onset_date + timedelta(days=params.severe_alert_offset_days)
+
+    if transmission_end < symptom_onset_date:
+        observation = (
+            "A data final para busca de contatos está anterior ao início dos sintomas. "
+            "Revisar a data final operacional."
+        )
+    else:
+        observation = (
+            "Cálculo realizado a partir da data de início dos sintomas, quando conhecida, ou estimada "
+            "retrospectivamente pela condição clínica no momento da detecção. Os marcos evolutivos são alertas "
+            "operacionais, não etapas obrigatórias."
+        )
+
+    return CaseCalculation(
+        last_exposure_date=last_exposure_date,
+        detection_date=detection_date,
+        clinical_condition_at_detection=clinical_condition_at_detection,
+        onset_known=onset_known,
+        symptom_onset_status=symptom_onset_status,
+        symptom_onset_date=symptom_onset_date,
+        onset_estimation_method=onset_estimation_method,
+        exposure_window_start=exposure_window_start,
+        exposure_window_end=exposure_window_end,
+        symptom_window_from_exposure_start=symptom_window_from_exposure_start,
+        symptom_window_from_exposure_end=symptom_window_from_exposure_end,
+        exposure_onset_compatibility=compatibility,
+        wet_symptom_alert_date=wet_symptom_alert_date,
+        severe_alert_date=severe_alert_date,
+        transmission_start=symptom_onset_date,
         transmission_end=transmission_end,
         observation=observation,
     )
 
 
-def calculate_all_scenarios(
-    symptom_report_date: date,
-    transmission_end: date,
-    params: CalculatorParams,
-    include_death_scenario: bool = False,
-    death_date: date | None = None,
-) -> list[ScenarioResult]:
-    validate_params(params)
-
-    results: list[ScenarioResult] = []
-    for cfg in SYMPTOM_SCENARIOS:
-        estimated_onset = estimate_onset_from_symptom_date(symptom_report_date, cfg, params)
-        results.append(
-            calculate_scenario(
-                scenario=cfg["scenario"],
-                basis=cfg["basis"],
-                reported_date=symptom_report_date,
-                estimated_onset=estimated_onset,
-                transmission_end=transmission_end,
-                observation=cfg["observation"],
-                params=params,
-            )
-        )
-
-    if include_death_scenario and death_date is not None:
-        estimated_onset = death_date - timedelta(days=params.death_offset_days)
-        results.append(
-            calculate_scenario(
-                scenario="Data de óbito",
-                basis="Data de óbito ajustada para trás pelo intervalo médio entre início dos sintomas e óbito",
-                reported_date=death_date,
-                estimated_onset=estimated_onset,
-                transmission_end=transmission_end,
-                observation="Útil quando a data de início dos sintomas é ausente, imprecisa ou conflitante.",
-                params=params,
-            )
-        )
-
-    return results
+def case_to_df(case: CaseCalculation) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "data da última exposição": case.last_exposure_date,
+                "data da detecção/avaliação": case.detection_date,
+                "condição clínica observada na detecção": case.clinical_condition_at_detection,
+                "início dos sintomas conhecido?": "Sim" if case.onset_known else "Não",
+                "início real/estimado dos sintomas": case.symptom_onset_date,
+                "tipo da data de sintomas": case.symptom_onset_status,
+                "método usado para definir início dos sintomas": case.onset_estimation_method,
+                "início provável da exposição/infecção": case.exposure_window_start,
+                "fim provável da exposição/infecção": case.exposure_window_end,
+                "início possível de sintomas pela última exposição": case.symptom_window_from_exposure_start,
+                "fim possível de sintomas pela última exposição": case.symptom_window_from_exposure_end,
+                "compatibilidade exposição-sintomas": case.exposure_onset_compatibility,
+                "alerta para sintomas úmidos/tardios": case.wet_symptom_alert_date,
+                "alerta para sangramento/sinais de gravidade": case.severe_alert_date,
+                "início da janela transmissível": case.transmission_start,
+                "fim operacional da janela transmissível": case.transmission_end,
+                "observação": case.observation,
+            }
+        ]
+    )
 
 
-def scenario_results_to_df(results: Iterable[ScenarioResult]) -> pd.DataFrame:
-    rows = []
-    for result in results:
+def make_case_timeline(case: CaseCalculation) -> pd.DataFrame:
+    rows = [
+        {
+            "item": "Caso índice",
+            "fase": "Janela provável de exposição/infecção",
+            "início": case.exposure_window_start,
+            "fim": case.exposure_window_end + timedelta(days=1),
+        },
+        {
+            "item": "Caso índice",
+            "fase": "Janela operacional de transmissibilidade",
+            "início": case.transmission_start,
+            "fim": case.transmission_end + timedelta(days=1),
+        },
+        {
+            "item": "Marcos clínicos/operacionais",
+            "fase": "Data da detecção/avaliação",
+            "início": case.detection_date,
+            "fim": case.detection_date + timedelta(days=1),
+        },
+        {
+            "item": "Marcos clínicos/operacionais",
+            "fase": "Início real/estimado dos sintomas",
+            "início": case.symptom_onset_date,
+            "fim": case.symptom_onset_date + timedelta(days=1),
+        },
+        {
+            "item": "Marcos clínicos/operacionais",
+            "fase": "Alerta para sintomas úmidos/tardios",
+            "início": case.wet_symptom_alert_date,
+            "fim": case.wet_symptom_alert_date + timedelta(days=1),
+        },
+        {
+            "item": "Marcos clínicos/operacionais",
+            "fase": "Alerta para sangramento/sinais de gravidade",
+            "início": case.severe_alert_date,
+            "fim": case.severe_alert_date + timedelta(days=1),
+        },
+    ]
+
+    if case.last_exposure_date is not None:
         rows.append(
             {
-                "cenário": result.scenario,
-                "base do cálculo": result.basis,
-                "data informada": result.reported_date,
-                "início estimado dos sintomas": result.estimated_symptom_onset,
-                "início provável da exposição": result.exposure_start,
-                "fim provável da exposição": result.exposure_end,
-                "início da janela transmissível": result.transmission_start,
-                "fim operacional da janela transmissível": result.transmission_end,
-                "observação": result.observation,
+                "item": "Exposição informada",
+                "fase": "Data da última exposição",
+                "início": case.last_exposure_date,
+                "fim": case.last_exposure_date + timedelta(days=1),
             }
         )
-    return pd.DataFrame(rows)
 
-
-def make_timeline_df(results: Iterable[ScenarioResult]) -> pd.DataFrame:
-    rows = []
-    for result in results:
-        rows.extend(
-            [
-                {
-                    "cenário": result.scenario,
-                    "fase": "Janela provável de exposição do caso índice",
-                    "início": result.exposure_start,
-                    "fim": result.exposure_end + timedelta(days=1),
-                },
-                {
-                    "cenário": result.scenario,
-                    "fase": "Janela operacional de transmissibilidade do caso índice",
-                    "início": result.transmission_start,
-                    "fim": result.transmission_end + timedelta(days=1),
-                },
-                {
-                    "cenário": result.scenario,
-                    "fase": "Data informada",
-                    "início": result.reported_date,
-                    "fim": result.reported_date + timedelta(days=1),
-                },
-            ]
+    if case.symptom_window_from_exposure_start is not None and case.symptom_window_from_exposure_end is not None:
+        rows.append(
+            {
+                "item": "Exposição informada",
+                "fase": "Janela possível de início de sintomas pela última exposição",
+                "início": case.symptom_window_from_exposure_start,
+                "fim": case.symptom_window_from_exposure_end + timedelta(days=1),
+            }
         )
+
     return pd.DataFrame(rows)
 
 
-def to_iso_payload(results: list[ScenarioResult], params: CalculatorParams) -> dict:
-    payload = {"params": asdict(params), "scenarios": []}
-    for result in results:
-        item = asdict(result)
-        for field in [
-            "reported_date",
-            "estimated_symptom_onset",
-            "exposure_start",
-            "exposure_end",
-            "transmission_start",
-            "transmission_end",
-        ]:
-            item[field] = item[field].isoformat()
-        payload["scenarios"].append(item)
-    return payload
+def case_to_iso_payload(case: CaseCalculation, params: CalculatorParams) -> dict:
+    return {
+        "params": asdict(params),
+        "case": {
+            "last_exposure_date": date_or_none_to_iso(case.last_exposure_date),
+            "detection_date": case.detection_date.isoformat(),
+            "clinical_condition_at_detection": case.clinical_condition_at_detection,
+            "onset_known": case.onset_known,
+            "symptom_onset_status": case.symptom_onset_status,
+            "symptom_onset_date": case.symptom_onset_date.isoformat(),
+            "onset_estimation_method": case.onset_estimation_method,
+            "exposure_window_start": case.exposure_window_start.isoformat(),
+            "exposure_window_end": case.exposure_window_end.isoformat(),
+            "symptom_window_from_exposure_start": date_or_none_to_iso(case.symptom_window_from_exposure_start),
+            "symptom_window_from_exposure_end": date_or_none_to_iso(case.symptom_window_from_exposure_end),
+            "exposure_onset_compatibility": case.exposure_onset_compatibility,
+            "wet_symptom_alert_date": case.wet_symptom_alert_date.isoformat(),
+            "severe_alert_date": case.severe_alert_date.isoformat(),
+            "transmission_start": case.transmission_start.isoformat(),
+            "transmission_end": case.transmission_end.isoformat(),
+            "observation": case.observation,
+        },
+    }
 
 
 # ============================================================
@@ -418,18 +493,13 @@ def is_contact_compatible_with_source(
     source_id: str,
     last_contact: date,
     contacts_by_id: dict[str, dict],
-    index_scenarios: list[ScenarioResult],
+    case: CaseCalculation,
 ) -> tuple[str, str]:
     source_id = clean_text(source_id) or "Caso índice"
 
     if source_id == "Caso índice":
-        compatible = [
-            s.scenario
-            for s in index_scenarios
-            if s.transmission_start <= last_contact <= s.transmission_end
-        ]
-        if compatible:
-            return "Sim", ", ".join(compatible)
+        if case.transmission_start <= last_contact <= case.transmission_end:
+            return "Sim", f"{fmt_br(case.transmission_start)} a {fmt_br(case.transmission_end)}"
         return "Não", "-"
 
     source = contacts_by_id.get(source_id)
@@ -450,7 +520,7 @@ def is_contact_compatible_with_source(
 
 def evaluate_contacts(
     contacts_df: pd.DataFrame,
-    scenario_results: list[ScenarioResult],
+    case: CaseCalculation,
     params: CalculatorParams,
 ) -> pd.DataFrame:
     contacts = normalize_contacts_df(contacts_df)
@@ -498,7 +568,7 @@ def evaluate_contacts(
             source_id=source,
             last_contact=last_contact,
             contacts_by_id=contacts_by_id,
-            index_scenarios=scenario_results,
+            case=case,
         )
 
         symptom_window_start = last_contact + timedelta(days=params.min_incubation_days)
@@ -606,7 +676,7 @@ def configure_page() -> None:
     st.set_page_config(page_title="Calculadora Ebola", page_icon="🦠", layout="wide")
     st.title("Calculadora Ebola")
     st.caption(
-        "Janela provável de exposição, transmissibilidade, contatos, prazos de monitoramento, evolução e mapa de possível cadeia de transmissão."
+        "Janela provável de exposição, detecção em fase posterior, início dos sintomas, marcos evolutivos, contatos e cadeia provável."
     )
 
 
@@ -629,22 +699,22 @@ def sidebar_params() -> CalculatorParams:
             max_inc = st.number_input("Incubação máxima, em dias", min_value=1, max_value=60, value=17)
 
         wet_offset = st.number_input(
-            "Dias entre início dos sintomas e sintomas úmidos/tardios",
+            "Dias após início dos sintomas para alerta de sintomas úmidos/tardios",
             min_value=0,
             max_value=30,
             value=4,
         )
 
-        bleeding_offset = st.number_input(
-            "Dias entre início dos sintomas e sangramento/manifestações hemorrágicas",
+        severe_offset = st.number_input(
+            "Dias após início dos sintomas para alerta de sangramento/sinais de gravidade",
             min_value=0,
             max_value=30,
-            value=7,
-            help="Usado apenas como subcategoria operacional quando a data conhecida é a data do sangramento.",
+            value=5,
+            help="Alerta operacional. Não significa que sangramento ocorrerá obrigatoriamente.",
         )
 
         death_offset = st.number_input(
-            "Dias entre início dos sintomas e óbito",
+            "Dias entre início dos sintomas e óbito, quando o caso é detectado por óbito",
             min_value=0,
             max_value=60,
             value=10,
@@ -659,70 +729,115 @@ def sidebar_params() -> CalculatorParams:
 
         st.divider()
         st.markdown(
-            "**Nota técnica:** a classificação principal adotada é sintomas secos/iniciais e sintomas úmidos/tardios. "
-            "Sangramento é tratado como subcategoria operacional de manifestação úmida/tardia."
+            "**Nota técnica:** sangramento não é tratado como etapa obrigatória. "
+            "O campo é apenas um alerta operacional para sangramento/sinais de gravidade."
         )
 
     return CalculatorParams(
         min_incubation_days=int(min_inc),
         max_incubation_days=int(max_inc),
         wet_symptom_offset_days=int(wet_offset),
-        bleeding_symptom_offset_days=int(bleeding_offset),
+        severe_alert_offset_days=int(severe_offset),
         death_offset_days=int(death_offset),
         contact_monitoring_days=int(monitoring_days),
     )
 
 
-def render_inputs() -> tuple[date, date, bool, date | None]:
+def render_inputs() -> tuple[date | None, date, str, bool, date | None, str, date]:
     st.subheader("1. Dados do caso índice")
 
-    c1, c2, c3 = st.columns([0.33, 0.33, 0.34])
+    c1, c2, c3 = st.columns([0.30, 0.35, 0.35])
+
     with c1:
-        symptom_report_date = st.date_input(
-            "Data informada relacionada aos sintomas",
+        has_last_exposure = st.checkbox(
+            "Informar data da última exposição",
+            value=True,
+            help="Use quando houver uma data conhecida ou estimada de última exposição de risco.",
+        )
+        last_exposure_date = None
+        if has_last_exposure:
+            last_exposure_date = st.date_input(
+                "Data da última exposição",
+                value=date.today(),
+                format="DD/MM/YYYY",
+            )
+
+    with c2:
+        detection_date = st.date_input(
+            "Data da detecção/avaliação",
             value=date.today(),
             format="DD/MM/YYYY",
-            help=(
-                "A ferramenta calcula automaticamente: sintomas secos/iniciais, sintomas úmidos/tardios e "
-                "sangramento como subcategoria operacional."
-            ),
+            help="Data em que o caso foi identificado, avaliado ou detectado.",
         )
-    with c2:
+
+        clinical_condition = st.selectbox(
+            "Condição clínica observada na detecção",
+            options=CLINICAL_CONDITION_OPTIONS,
+            index=0,
+            help="Use esta opção quando o início dos sintomas não for conhecido e o paciente já for detectado em fase posterior.",
+        )
+
+    with c3:
+        onset_known = st.checkbox(
+            "Data de início dos sintomas é conhecida?",
+            value=True,
+            help="Marque quando houver data real, estimada ou aproximada de início dos sintomas.",
+        )
+
+        known_onset_date = None
+        symptom_onset_status = "Estimado retrospectivamente pela condição clínica na detecção"
+
+        if onset_known:
+            known_onset_date = st.date_input(
+                "Data real/estimada de início dos sintomas",
+                value=date.today(),
+                format="DD/MM/YYYY",
+            )
+            symptom_onset_status = st.selectbox(
+                "Tipo da data de sintomas",
+                options=ONSET_STATUS_OPTIONS,
+                index=0,
+            )
+
         transmission_end = st.date_input(
             "Data final para busca de contatos",
             value=date.today(),
             format="DD/MM/YYYY",
             help="Use a data de isolamento, óbito, sepultamento seguro, último contato possível ou encerramento da investigação.",
         )
-    with c3:
-        include_death = st.checkbox(
-            "Incluir cenário por data de óbito",
-            value=False,
-            help="Útil quando a data de início dos sintomas é desconhecida, conflitante ou pouco confiável.",
-        )
-        death_date = None
-        if include_death:
-            death_date = st.date_input("Data de óbito", value=date.today(), format="DD/MM/YYYY")
 
-    return symptom_report_date, transmission_end, include_death, death_date
-
-
-def render_scenarios(results: list[ScenarioResult], params: CalculatorParams) -> None:
-    st.subheader("2. Janelas calculadas automaticamente")
-
-    st.info(
-        "Referência conceitual: o CDC usa a classificação 'dry symptoms' para sintomas iniciais e "
-        "'wet symptoms' para sintomas tardios. Sangramento é apresentado como manifestação úmida/tardia, "
-        "não como terceira categoria oficial independente."
+    return (
+        last_exposure_date,
+        detection_date,
+        clinical_condition,
+        onset_known,
+        known_onset_date,
+        symptom_onset_status,
+        transmission_end,
     )
 
-    df = scenario_results_to_df(results)
+
+def render_case_results(case: CaseCalculation, params: CalculatorParams) -> None:
+    st.subheader("2. Exposição, detecção, sintomas e marcos evolutivos")
+
+    st.info(
+        "A ferramenta separa: data da última exposição, data da detecção/avaliação, data real/estimada "
+        "de início dos sintomas e marcos evolutivos após o início dos sintomas. Se o início dos sintomas "
+        "não for conhecido, ele é estimado retrospectivamente a partir da condição clínica observada na detecção."
+    )
+
+    df = case_to_df(case)
 
     date_cols = [
-        "data informada",
-        "início estimado dos sintomas",
-        "início provável da exposição",
-        "fim provável da exposição",
+        "data da última exposição",
+        "data da detecção/avaliação",
+        "início real/estimado dos sintomas",
+        "início provável da exposição/infecção",
+        "fim provável da exposição/infecção",
+        "início possível de sintomas pela última exposição",
+        "fim possível de sintomas pela última exposição",
+        "alerta para sintomas úmidos/tardios",
+        "alerta para sangramento/sinais de gravidade",
         "início da janela transmissível",
         "fim operacional da janela transmissível",
     ]
@@ -730,38 +845,37 @@ def render_scenarios(results: list[ScenarioResult], params: CalculatorParams) ->
     display_df = format_date_columns_br(df, date_cols)
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    timeline = make_timeline_df(results)
+    timeline = make_case_timeline(case)
     fig = px.timeline(
         timeline,
         x_start="início",
         x_end="fim",
-        y="cenário",
+        y="item",
         color="fase",
         hover_data={"fase": True, "início": True, "fim": True},
     )
     fig.update_yaxes(autorange="reversed")
-    fig.update_layout(height=430, margin=dict(l=20, r=20, t=35, b=20), legend_title_text="Fase")
+    fig.update_layout(height=490, margin=dict(l=20, r=20, t=35, b=20), legend_title_text="Fase/marco")
     st.plotly_chart(fig, use_container_width=True)
 
-    payload = to_iso_payload(results, params)
-    csv_df = display_df.copy()
-    csv_data = csv_df.to_csv(index=False).encode("utf-8-sig")
+    payload = case_to_iso_payload(case, params)
+    csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
     json_data = json.dumps(payload, ensure_ascii=False, indent=2)
 
     d1, d2 = st.columns(2)
     with d1:
         st.download_button(
-            "Baixar janelas em CSV",
+            "Baixar cálculo do caso índice em CSV",
             data=csv_data,
-            file_name="calculadora_ebola_janelas.csv",
+            file_name="calculadora_ebola_caso_indice.csv",
             mime="text/csv",
             use_container_width=True,
         )
     with d2:
         st.download_button(
-            "Baixar janelas em JSON técnico",
+            "Baixar cálculo do caso índice em JSON técnico",
             data=json_data,
-            file_name="calculadora_ebola_janelas.json",
+            file_name="calculadora_ebola_caso_indice.json",
             mime="application/json",
             help="O JSON permanece em formato ISO AAAA-MM-DD para interoperabilidade técnica.",
             use_container_width=True,
@@ -829,12 +943,12 @@ def render_contact_editor() -> pd.DataFrame:
 
 def render_contacts_analysis(
     contacts_df: pd.DataFrame,
-    results: list[ScenarioResult],
+    case: CaseCalculation,
     params: CalculatorParams,
 ) -> pd.DataFrame:
     st.subheader("4. Monitoramento de contatos")
 
-    evaluated = evaluate_contacts(contacts_df, results, params)
+    evaluated = evaluate_contacts(contacts_df, case, params)
 
     if evaluated.empty:
         st.info("Inclua ao menos um contato com identificador para calcular o monitoramento.")
@@ -1070,19 +1184,17 @@ def render_interpretation() -> None:
     st.subheader("6. Interpretação operacional")
     st.markdown(
         """
-        **1. Nomenclatura clínica:** a ferramenta usa a divisão operacional entre sintomas secos/iniciais e sintomas úmidos/tardios. O campo de sangramento é mantido apenas como subcategoria operacional quando a data disponível na investigação for o início da manifestação hemorrágica.
+        **1. Estrutura do cálculo:** a ferramenta separa data da última exposição, data da detecção/avaliação, condição clínica no momento da detecção, data de início dos sintomas e marcos evolutivos posteriores.
 
-        **2. Caso índice:** a ferramenta calcula automaticamente hipóteses de exposição e transmissibilidade a partir da data informada.
+        **2. Detecção em fase posterior:** se o início dos sintomas não for conhecido, a ferramenta estima retrospectivamente a data provável de início dos sintomas a partir da condição clínica observada na detecção.
 
-        **3. Contatos reais:** cada linha representa um contato ou possível caso secundário. Use identificadores internos, data do último contato, tipo de exposição, município, risco e evolução.
+        **3. Nomenclatura clínica:** sintomas secos/iniciais e sintomas úmidos/tardios são mantidos como referência operacional. Sangramento deixa de ser tratado como etapa obrigatória e passa a aparecer como **alerta para sangramento/sinais de gravidade**.
 
-        **4. Prazo de monitoramento:** a data limite é calculada a partir do último contato de risco, conforme o número de dias definido na barra lateral.
+        **4. Exposição:** quando a data da última exposição é informada, a ferramenta calcula a janela possível de início dos sintomas a partir dessa exposição e compara com a data de início dos sintomas.
 
-        **5. Evolução:** o campo permite acompanhar se o contato permanece assintomático, evoluiu com sintomas, tornou-se suspeito/confirmado, foi descartado, evoluiu a óbito ou teve monitoramento encerrado.
+        **5. Sintomas:** quando a data de início dos sintomas é informada ou estimada, a ferramenta calcula retrospectivamente a janela provável de exposição/infecção.
 
-        **6. Cadeia de transmissão:** o campo “caso-origem” permite desenhar a cadeia provável. Se o contato C002 teve contato com C001, informe C001 como caso-origem de C002.
-
-        **7. Limite da ferramenta:** compatibilidade temporal não confirma transmissão. A interpretação final depende de investigação epidemiológica, clínica, laboratório, contexto do surto, exposição real e validação da equipe responsável.
+        **6. Limite da ferramenta:** compatibilidade temporal não confirma transmissão. A interpretação final depende de investigação epidemiológica, clínica, laboratório, contexto do surto, exposição real e validação da equipe responsável.
         """
     )
 
@@ -1090,22 +1202,28 @@ def render_interpretation() -> None:
         """
         ### Como as datas são calculadas
 
-        **Caso índice**
+        **Data da última exposição**
 
-        - **Sintomas secos/iniciais:** a data informada é considerada como o início estimado dos sintomas.
-        - **Sintomas úmidos/tardios:** a ferramenta subtrai o número de dias configurado para sintomas úmidos/tardios.
-        - **Sangramento/manifestação hemorrágica:** a ferramenta subtrai o número de dias configurado para sangramento, tratando-o como subcategoria operacional de sintoma úmido/tardio.
-        - **Óbito, quando informado:** a ferramenta subtrai o número de dias configurado entre início dos sintomas e óbito.
+        - Janela possível de início de sintomas = data da última exposição + incubação mínima até incubação máxima.
 
-        **Janela provável de exposição**
+        **Data da detecção/avaliação**
 
-        - Início provável da exposição = início estimado dos sintomas - incubação máxima.
-        - Fim provável da exposição = início estimado dos sintomas - incubação mínima.
+        - Quando o início dos sintomas não é conhecido, a ferramenta estima retrospectivamente o início dos sintomas conforme a condição clínica observada:
+          - sintomas secos/iniciais: usa a própria data da detecção;
+          - sintomas úmidos/tardios: subtrai os dias configurados para sintomas úmidos/tardios;
+          - sinais de gravidade ou sangramento observado: subtrai os dias configurados para alerta de gravidade;
+          - óbito: subtrai os dias configurados entre início dos sintomas e óbito.
 
-        **Janela operacional de transmissibilidade**
+        **Data real ou estimada de início dos sintomas**
 
-        - Início = início estimado dos sintomas.
-        - Fim = data final para busca de contatos informada pelo usuário.
+        - Janela provável de exposição/infecção = início dos sintomas - incubação máxima até início dos sintomas - incubação mínima.
+        - Início da janela transmissível = início dos sintomas.
+        - Fim operacional da janela transmissível = data final para busca de contatos informada pelo usuário.
+
+        **Marcos evolutivos após início dos sintomas**
+
+        - Alerta para sintomas úmidos/tardios = início dos sintomas + dias configurados para sintomas úmidos/tardios.
+        - Alerta para sangramento/sinais de gravidade = início dos sintomas + dias configurados para alerta de gravidade.
 
         **Contatos**
 
@@ -1128,31 +1246,41 @@ def main() -> None:
     configure_page()
     params = sidebar_params()
 
-    symptom_report_date, transmission_end, include_death, death_date = render_inputs()
+    (
+        last_exposure_date,
+        detection_date,
+        clinical_condition,
+        onset_known,
+        known_onset_date,
+        symptom_onset_status,
+        transmission_end,
+    ) = render_inputs()
 
     try:
-        results = calculate_all_scenarios(
-            symptom_report_date=symptom_report_date,
+        case = calculate_case(
+            last_exposure_date=last_exposure_date,
+            detection_date=detection_date,
+            clinical_condition_at_detection=clinical_condition,
+            onset_known=onset_known,
+            known_symptom_onset_date=known_onset_date,
+            symptom_onset_status=symptom_onset_status,
             transmission_end=transmission_end,
             params=params,
-            include_death_scenario=include_death,
-            death_date=death_date,
         )
 
-        invalid_transmission = [r for r in results if r.transmission_end < r.transmission_start]
-        if invalid_transmission:
+        if case.transmission_end < case.transmission_start:
             st.warning(
-                "A data final para busca de contatos está anterior ao início estimado dos sintomas em pelo menos um cenário. "
-                "Isso pode acontecer quando a data informada de sintomas é tardia ou quando a data final precisa ser ajustada."
+                "A data final para busca de contatos está anterior ao início dos sintomas. "
+                "Revisar a data final operacional."
             )
 
-        render_scenarios(results, params)
+        render_case_results(case, params)
         st.divider()
 
         contacts_df = render_contact_editor()
         st.divider()
 
-        render_contacts_analysis(contacts_df, results, params)
+        render_contacts_analysis(contacts_df, case, params)
         st.divider()
 
         render_chain_section(contacts_df)
