@@ -29,10 +29,21 @@ class CaseCalculation:
     last_exposure_date: date | None
     detection_date: date
     clinical_condition_at_detection: str
+    case_status: str
+    death_date: date | None
+    death_after_symptoms: str
+    body_manipulation: str
+    funeral_or_wake: str
+    body_transport: str
+    post_mortem_contact: str
+    safe_burial_or_post_mortem_end_date: date | None
+    live_exposure_end_date: date
+    operational_contact_search_end_date: date
     onset_known: bool
     symptom_onset_status: str
     symptom_onset_date: date
     onset_estimation_method: str
+    estimate_confidence: str
     exposure_window_start: date
     exposure_window_end: date
     symptom_window_from_exposure_start: date | None
@@ -41,9 +52,14 @@ class CaseCalculation:
     wet_symptom_alert_date: date
     severe_alert_date: date
     transmission_start: date
-    transmission_end: date
     observation: str
 
+
+CASE_STATUS_OPTIONS = ["Vivo/em acompanhamento", "Óbito", "Ignorado"]
+
+DEATH_AFTER_SYMPTOMS_OPTIONS = ["Sim", "Não", "Desconhecido", "Não se aplica"]
+
+YES_NO_UNKNOWN = ["Não", "Sim", "Desconhecido"]
 
 EVOLUTION_OPTIONS = [
     "Em monitoramento",
@@ -70,6 +86,23 @@ CLINICAL_CONDITION_OPTIONS = [
     "Sinais de gravidade",
     "Sangramento observado",
     "Óbito",
+    "Sem informação clínica suficiente",
+]
+
+EXPOSURE_TYPE_OPTIONS = [
+    "",
+    "Contato domiciliar",
+    "Cuidado direto",
+    "Serviço de saúde",
+    "Laboratório",
+    "Transporte do paciente",
+    "Contato com fluidos",
+    "Manipulação do corpo",
+    "Velório/funeral",
+    "Sepultamento",
+    "Limpeza/desinfecção",
+    "Comunidade/evento",
+    "Outro",
 ]
 
 
@@ -125,6 +158,11 @@ def date_or_none_to_iso(value: date | None) -> str | None:
     return value.isoformat() if value else None
 
 
+def max_date_or_none(values: list[date | None]) -> date | None:
+    valid = [v for v in values if v is not None]
+    return max(valid) if valid else None
+
+
 # ============================================================
 # Cálculo do caso índice
 # ============================================================
@@ -142,45 +180,83 @@ def estimate_onset_from_detection(
     detection_date: date,
     clinical_condition: str,
     params: CalculatorParams,
-) -> tuple[date, str]:
+) -> tuple[date, str, str]:
     if clinical_condition == "Sintomas secos/iniciais":
         return (
             detection_date,
             "Início dos sintomas estimado como a própria data de detecção, pois a condição observada foi de sintomas secos/iniciais.",
+            "Moderada",
         )
 
     if clinical_condition == "Sintomas úmidos/tardios":
         return (
             detection_date - timedelta(days=params.wet_symptom_offset_days),
             "Início dos sintomas estimado retrospectivamente a partir da detecção com sintomas úmidos/tardios.",
+            "Moderada",
         )
 
     if clinical_condition in ["Sinais de gravidade", "Sangramento observado"]:
         return (
             detection_date - timedelta(days=params.severe_alert_offset_days),
             "Início dos sintomas estimado retrospectivamente a partir da detecção com sinais de gravidade/sangramento observado.",
+            "Baixa a moderada",
         )
 
     if clinical_condition == "Óbito":
         return (
             detection_date - timedelta(days=params.death_offset_days),
             "Início dos sintomas estimado retrospectivamente a partir da data de óbito.",
+            "Baixa a moderada",
         )
 
-    raise ValueError("Condição clínica na detecção não reconhecida.")
+    raise ValueError(
+        "Informação clínica insuficiente para estimar o início dos sintomas. Informe a data de início dos sintomas ou selecione uma condição clínica válida."
+    )
+
+
+def calculate_operational_contact_search_end(
+    case_status: str,
+    live_exposure_end_date: date,
+    death_date: date | None,
+    safe_burial_or_post_mortem_end_date: date | None,
+) -> date:
+    if case_status == "Óbito":
+        return max_date_or_none(
+            [live_exposure_end_date, death_date, safe_burial_or_post_mortem_end_date]
+        ) or live_exposure_end_date
+
+    return live_exposure_end_date
 
 
 def calculate_case(
     last_exposure_date: date | None,
     detection_date: date,
     clinical_condition_at_detection: str,
+    case_status: str,
+    death_date: date | None,
+    death_after_symptoms: str,
+    body_manipulation: str,
+    funeral_or_wake: str,
+    body_transport: str,
+    post_mortem_contact: str,
+    safe_burial_or_post_mortem_end_date: date | None,
+    live_exposure_end_date: date,
     onset_known: bool,
     known_symptom_onset_date: date | None,
     symptom_onset_status: str,
-    transmission_end: date,
     params: CalculatorParams,
 ) -> CaseCalculation:
     validate_params(params)
+
+    if case_status == "Óbito" and death_date is None:
+        raise ValueError("Informe a data do óbito quando a situação do caso for óbito.")
+
+    operational_end = calculate_operational_contact_search_end(
+        case_status=case_status,
+        live_exposure_end_date=live_exposure_end_date,
+        death_date=death_date,
+        safe_burial_or_post_mortem_end_date=safe_burial_or_post_mortem_end_date,
+    )
 
     if onset_known:
         if known_symptom_onset_date is None:
@@ -189,13 +265,26 @@ def calculate_case(
         onset_estimation_method = (
             "Data de início dos sintomas informada diretamente como real, estimada ou aproximada pela investigação."
         )
+        estimate_confidence = "Alta, se a data foi observada; moderada, se estimada/aproximada."
     else:
-        symptom_onset_date, onset_estimation_method = estimate_onset_from_detection(
-            detection_date=detection_date,
-            clinical_condition=clinical_condition_at_detection,
-            params=params,
-        )
-        symptom_onset_status = "Estimado retrospectivamente pela condição clínica na detecção"
+        if case_status == "Óbito" and death_after_symptoms in ["Sim", "Desconhecido"]:
+            symptom_onset_date = death_date - timedelta(days=params.death_offset_days)  # type: ignore[operator]
+            onset_estimation_method = (
+                "Início dos sintomas estimado retrospectivamente pela data do óbito, pois o caso evoluiu a óbito com sintomas ou com informação sintomática desconhecida."
+            )
+            estimate_confidence = "Baixa a moderada"
+            symptom_onset_status = "Estimado retrospectivamente pela data do óbito"
+        elif case_status == "Óbito" and death_after_symptoms == "Não" and clinical_condition_at_detection == "Óbito":
+            raise ValueError(
+                "Óbito sem sintomas conhecidos não permite estimar início dos sintomas apenas pela data de óbito. Informe dados clínicos ou uma data estimada de início dos sintomas."
+            )
+        else:
+            symptom_onset_date, onset_estimation_method, estimate_confidence = estimate_onset_from_detection(
+                detection_date=detection_date,
+                clinical_condition=clinical_condition_at_detection,
+                params=params,
+            )
+            symptom_onset_status = "Estimado retrospectivamente pela condição clínica na detecção"
 
     exposure_window_start = symptom_onset_date - timedelta(days=params.max_incubation_days)
     exposure_window_end = symptom_onset_date - timedelta(days=params.min_incubation_days)
@@ -216,26 +305,41 @@ def calculate_case(
     wet_symptom_alert_date = symptom_onset_date + timedelta(days=params.wet_symptom_offset_days)
     severe_alert_date = symptom_onset_date + timedelta(days=params.severe_alert_offset_days)
 
-    if transmission_end < symptom_onset_date:
+    if operational_end < symptom_onset_date:
         observation = (
-            "A data final para busca de contatos está anterior ao início dos sintomas. "
-            "Revisar a data final operacional."
+            "A data final operacional da busca de contatos está anterior ao início dos sintomas. "
+            "Revisar a data final de exposição em vida ou pós-óbito."
+        )
+    elif case_status == "Óbito":
+        observation = (
+            "Óbito registrado como desfecho. Se houve manipulação do corpo, transporte, velório/funeral, sepultamento ou contato pós-óbito, "
+            "a busca de contatos deve considerar exposições até a data de sepultamento seguro ou encerramento da exposição pós-óbito."
         )
     else:
         observation = (
-            "Cálculo realizado a partir da data de início dos sintomas, quando conhecida, ou estimada "
-            "retrospectivamente pela condição clínica no momento da detecção. Os marcos evolutivos são alertas "
-            "operacionais, não etapas obrigatórias."
+            "Cálculo realizado a partir da data de início dos sintomas, quando conhecida, ou estimada retrospectivamente pela condição clínica na detecção. "
+            "Os marcos evolutivos são alertas operacionais, não etapas obrigatórias."
         )
 
     return CaseCalculation(
         last_exposure_date=last_exposure_date,
         detection_date=detection_date,
         clinical_condition_at_detection=clinical_condition_at_detection,
+        case_status=case_status,
+        death_date=death_date,
+        death_after_symptoms=death_after_symptoms,
+        body_manipulation=body_manipulation,
+        funeral_or_wake=funeral_or_wake,
+        body_transport=body_transport,
+        post_mortem_contact=post_mortem_contact,
+        safe_burial_or_post_mortem_end_date=safe_burial_or_post_mortem_end_date,
+        live_exposure_end_date=live_exposure_end_date,
+        operational_contact_search_end_date=operational_end,
         onset_known=onset_known,
         symptom_onset_status=symptom_onset_status,
         symptom_onset_date=symptom_onset_date,
         onset_estimation_method=onset_estimation_method,
+        estimate_confidence=estimate_confidence,
         exposure_window_start=exposure_window_start,
         exposure_window_end=exposure_window_end,
         symptom_window_from_exposure_start=symptom_window_from_exposure_start,
@@ -244,7 +348,6 @@ def calculate_case(
         wet_symptom_alert_date=wet_symptom_alert_date,
         severe_alert_date=severe_alert_date,
         transmission_start=symptom_onset_date,
-        transmission_end=transmission_end,
         observation=observation,
     )
 
@@ -256,10 +359,21 @@ def case_to_df(case: CaseCalculation) -> pd.DataFrame:
                 "data da última exposição": case.last_exposure_date,
                 "data da detecção/avaliação": case.detection_date,
                 "condição clínica observada na detecção": case.clinical_condition_at_detection,
+                "situação do caso": case.case_status,
+                "data do óbito": case.death_date,
+                "óbito ocorreu após sintomas?": case.death_after_symptoms,
+                "manipulação do corpo": case.body_manipulation,
+                "velório/funeral": case.funeral_or_wake,
+                "transporte do corpo": case.body_transport,
+                "contato pós-óbito identificado": case.post_mortem_contact,
+                "data de sepultamento seguro/fim exposição pós-óbito": case.safe_burial_or_post_mortem_end_date,
+                "data final da exposição em vida": case.live_exposure_end_date,
+                "fim operacional da busca de contatos": case.operational_contact_search_end_date,
                 "início dos sintomas conhecido?": "Sim" if case.onset_known else "Não",
                 "início real/estimado dos sintomas": case.symptom_onset_date,
                 "tipo da data de sintomas": case.symptom_onset_status,
                 "método usado para definir início dos sintomas": case.onset_estimation_method,
+                "confiança da estimativa": case.estimate_confidence,
                 "início provável da exposição/infecção": case.exposure_window_start,
                 "fim provável da exposição/infecção": case.exposure_window_end,
                 "início possível de sintomas pela última exposição": case.symptom_window_from_exposure_start,
@@ -268,7 +382,6 @@ def case_to_df(case: CaseCalculation) -> pd.DataFrame:
                 "alerta para sintomas úmidos/tardios": case.wet_symptom_alert_date,
                 "alerta para sangramento/sinais de gravidade": case.severe_alert_date,
                 "início da janela transmissível": case.transmission_start,
-                "fim operacional da janela transmissível": case.transmission_end,
                 "observação": case.observation,
             }
         ]
@@ -285,9 +398,9 @@ def make_case_timeline(case: CaseCalculation) -> pd.DataFrame:
         },
         {
             "item": "Caso índice",
-            "fase": "Janela operacional de transmissibilidade",
+            "fase": "Janela operacional de transmissibilidade/busca de contatos",
             "início": case.transmission_start,
-            "fim": case.transmission_end + timedelta(days=1),
+            "fim": case.operational_contact_search_end_date + timedelta(days=1),
         },
         {
             "item": "Marcos clínicos/operacionais",
@@ -313,6 +426,12 @@ def make_case_timeline(case: CaseCalculation) -> pd.DataFrame:
             "início": case.severe_alert_date,
             "fim": case.severe_alert_date + timedelta(days=1),
         },
+        {
+            "item": "Exposição em vida",
+            "fase": "Data final da exposição em vida",
+            "início": case.live_exposure_end_date,
+            "fim": case.live_exposure_end_date + timedelta(days=1),
+        },
     ]
 
     if case.last_exposure_date is not None:
@@ -335,6 +454,26 @@ def make_case_timeline(case: CaseCalculation) -> pd.DataFrame:
             }
         )
 
+    if case.case_status == "Óbito" and case.death_date is not None:
+        rows.append(
+            {
+                "item": "Óbito e pós-óbito",
+                "fase": "Data do óbito",
+                "início": case.death_date,
+                "fim": case.death_date + timedelta(days=1),
+            }
+        )
+
+    if case.case_status == "Óbito" and case.safe_burial_or_post_mortem_end_date is not None:
+        rows.append(
+            {
+                "item": "Óbito e pós-óbito",
+                "fase": "Sepultamento seguro/fim exposição pós-óbito",
+                "início": case.safe_burial_or_post_mortem_end_date,
+                "fim": case.safe_burial_or_post_mortem_end_date + timedelta(days=1),
+            }
+        )
+
     return pd.DataFrame(rows)
 
 
@@ -345,10 +484,21 @@ def case_to_iso_payload(case: CaseCalculation, params: CalculatorParams) -> dict
             "last_exposure_date": date_or_none_to_iso(case.last_exposure_date),
             "detection_date": case.detection_date.isoformat(),
             "clinical_condition_at_detection": case.clinical_condition_at_detection,
+            "case_status": case.case_status,
+            "death_date": date_or_none_to_iso(case.death_date),
+            "death_after_symptoms": case.death_after_symptoms,
+            "body_manipulation": case.body_manipulation,
+            "funeral_or_wake": case.funeral_or_wake,
+            "body_transport": case.body_transport,
+            "post_mortem_contact": case.post_mortem_contact,
+            "safe_burial_or_post_mortem_end_date": date_or_none_to_iso(case.safe_burial_or_post_mortem_end_date),
+            "live_exposure_end_date": case.live_exposure_end_date.isoformat(),
+            "operational_contact_search_end_date": case.operational_contact_search_end_date.isoformat(),
             "onset_known": case.onset_known,
             "symptom_onset_status": case.symptom_onset_status,
             "symptom_onset_date": case.symptom_onset_date.isoformat(),
             "onset_estimation_method": case.onset_estimation_method,
+            "estimate_confidence": case.estimate_confidence,
             "exposure_window_start": case.exposure_window_start.isoformat(),
             "exposure_window_end": case.exposure_window_end.isoformat(),
             "symptom_window_from_exposure_start": date_or_none_to_iso(case.symptom_window_from_exposure_start),
@@ -357,7 +507,6 @@ def case_to_iso_payload(case: CaseCalculation, params: CalculatorParams) -> dict
             "wet_symptom_alert_date": case.wet_symptom_alert_date.isoformat(),
             "severe_alert_date": case.severe_alert_date.isoformat(),
             "transmission_start": case.transmission_start.isoformat(),
-            "transmission_end": case.transmission_end.isoformat(),
             "observation": case.observation,
         },
     }
@@ -376,7 +525,7 @@ def default_contacts_df() -> pd.DataFrame:
                 "nome_codigo": "",
                 "caso_origem": "Caso índice",
                 "data_ultimo_contato": today,
-                "tipo_contato": "domiciliar / cuidado / funeral / serviço de saúde / outro",
+                "tipo_contato": "Contato domiciliar",
                 "municipio": "",
                 "risco": "Não classificado",
                 "evolucao": "Em monitoramento",
@@ -390,7 +539,7 @@ def default_contacts_df() -> pd.DataFrame:
                 "nome_codigo": "",
                 "caso_origem": "Caso índice",
                 "data_ultimo_contato": today,
-                "tipo_contato": "",
+                "tipo_contato": "Velório/funeral",
                 "municipio": "",
                 "risco": "Não classificado",
                 "evolucao": "Em monitoramento",
@@ -498,8 +647,8 @@ def is_contact_compatible_with_source(
     source_id = clean_text(source_id) or "Caso índice"
 
     if source_id == "Caso índice":
-        if case.transmission_start <= last_contact <= case.transmission_end:
-            return "Sim", f"{fmt_br(case.transmission_start)} a {fmt_br(case.transmission_end)}"
+        if case.transmission_start <= last_contact <= case.operational_contact_search_end_date:
+            return "Sim", f"{fmt_br(case.transmission_start)} a {fmt_br(case.operational_contact_search_end_date)}"
         return "Não", "-"
 
     source = contacts_by_id.get(source_id)
@@ -676,7 +825,7 @@ def configure_page() -> None:
     st.set_page_config(page_title="Calculadora Ebola", page_icon="🦠", layout="wide")
     st.title("Calculadora Ebola")
     st.caption(
-        "Janela provável de exposição, detecção em fase posterior, início dos sintomas, marcos evolutivos, contatos e cadeia provável."
+        "Janela provável de exposição, óbito, exposição pós-óbito, início dos sintomas, marcos evolutivos, contatos e cadeia provável."
     )
 
 
@@ -714,7 +863,7 @@ def sidebar_params() -> CalculatorParams:
         )
 
         death_offset = st.number_input(
-            "Dias entre início dos sintomas e óbito, quando o caso é detectado por óbito",
+            "Dias entre início dos sintomas e óbito, quando o início é desconhecido",
             min_value=0,
             max_value=60,
             value=10,
@@ -729,8 +878,8 @@ def sidebar_params() -> CalculatorParams:
 
         st.divider()
         st.markdown(
-            "**Nota técnica:** sangramento não é tratado como etapa obrigatória. "
-            "O campo é apenas um alerta operacional para sangramento/sinais de gravidade."
+            "**Nota técnica:** óbito é tratado como desfecho quando o início dos sintomas é conhecido, "
+            "e como base retrospectiva apenas quando o início dos sintomas é desconhecido."
         )
 
     return CalculatorParams(
@@ -743,7 +892,7 @@ def sidebar_params() -> CalculatorParams:
     )
 
 
-def render_inputs() -> tuple[date | None, date, str, bool, date | None, str, date]:
+def render_inputs() -> tuple:
     st.subheader("1. Dados do caso índice")
 
     c1, c2, c3 = st.columns([0.30, 0.35, 0.35])
@@ -762,7 +911,6 @@ def render_inputs() -> tuple[date | None, date, str, bool, date | None, str, dat
                 format="DD/MM/YYYY",
             )
 
-    with c2:
         detection_date = st.date_input(
             "Data da detecção/avaliação",
             value=date.today(),
@@ -770,12 +918,50 @@ def render_inputs() -> tuple[date | None, date, str, bool, date | None, str, dat
             help="Data em que o caso foi identificado, avaliado ou detectado.",
         )
 
+    with c2:
         clinical_condition = st.selectbox(
             "Condição clínica observada na detecção",
             options=CLINICAL_CONDITION_OPTIONS,
             index=0,
             help="Use esta opção quando o início dos sintomas não for conhecido e o paciente já for detectado em fase posterior.",
         )
+
+        case_status = st.selectbox(
+            "Situação/desfecho do caso",
+            options=CASE_STATUS_OPTIONS,
+            index=0,
+        )
+
+        death_date = None
+        death_after_symptoms = "Não se aplica"
+        body_manipulation = "Não"
+        funeral_or_wake = "Não"
+        body_transport = "Não"
+        post_mortem_contact = "Não"
+        safe_burial_or_post_mortem_end_date = None
+
+        if case_status == "Óbito":
+            death_date = st.date_input("Data do óbito", value=date.today(), format="DD/MM/YYYY")
+            death_after_symptoms = st.selectbox(
+                "Óbito ocorreu após sintomas?",
+                options=["Sim", "Não", "Desconhecido"],
+                index=0,
+            )
+            body_manipulation = st.selectbox("Houve manipulação do corpo?", YES_NO_UNKNOWN, index=0)
+            funeral_or_wake = st.selectbox("Houve velório/funeral?", YES_NO_UNKNOWN, index=0)
+            body_transport = st.selectbox("Houve transporte do corpo?", YES_NO_UNKNOWN, index=0)
+            post_mortem_contact = st.selectbox("Contato pós-óbito identificado?", YES_NO_UNKNOWN, index=0)
+
+            has_safe_burial = st.checkbox(
+                "Informar sepultamento seguro/fim da exposição pós-óbito",
+                value=True,
+            )
+            if has_safe_burial:
+                safe_burial_or_post_mortem_end_date = st.date_input(
+                    "Data de sepultamento seguro/fim exposição pós-óbito",
+                    value=date.today(),
+                    format="DD/MM/YYYY",
+                )
 
     with c3:
         onset_known = st.checkbox(
@@ -785,7 +971,7 @@ def render_inputs() -> tuple[date | None, date, str, bool, date | None, str, dat
         )
 
         known_onset_date = None
-        symptom_onset_status = "Estimado retrospectivamente pela condição clínica na detecção"
+        symptom_onset_status = "Estimado retrospectivamente"
 
         if onset_known:
             known_onset_date = st.date_input(
@@ -799,31 +985,39 @@ def render_inputs() -> tuple[date | None, date, str, bool, date | None, str, dat
                 index=0,
             )
 
-        transmission_end = st.date_input(
-            "Data final para busca de contatos",
+        live_exposure_end_date = st.date_input(
+            "Data final da exposição em vida",
             value=date.today(),
             format="DD/MM/YYYY",
-            help="Use a data de isolamento, óbito, sepultamento seguro, último contato possível ou encerramento da investigação.",
+            help="Use isolamento, último contato possível em vida, transferência segura, óbito ou encerramento da exposição em vida.",
         )
 
     return (
         last_exposure_date,
         detection_date,
         clinical_condition,
+        case_status,
+        death_date,
+        death_after_symptoms,
+        body_manipulation,
+        funeral_or_wake,
+        body_transport,
+        post_mortem_contact,
+        safe_burial_or_post_mortem_end_date,
+        live_exposure_end_date,
         onset_known,
         known_onset_date,
         symptom_onset_status,
-        transmission_end,
     )
 
 
 def render_case_results(case: CaseCalculation, params: CalculatorParams) -> None:
-    st.subheader("2. Exposição, detecção, sintomas e marcos evolutivos")
+    st.subheader("2. Exposição, óbito, pós-óbito, sintomas e marcos evolutivos")
 
     st.info(
-        "A ferramenta separa: data da última exposição, data da detecção/avaliação, data real/estimada "
-        "de início dos sintomas e marcos evolutivos após o início dos sintomas. Se o início dos sintomas "
-        "não for conhecido, ele é estimado retrospectivamente a partir da condição clínica observada na detecção."
+        "A ferramenta trata óbito como desfecho quando a data de início dos sintomas é conhecida. "
+        "Quando o início dos sintomas é desconhecido, a data de óbito pode ser usada para estimativa retrospectiva. "
+        "A busca de contatos considera exposição em vida e, quando aplicável, exposição pós-óbito até sepultamento seguro ou encerramento operacional."
     )
 
     df = case_to_df(case)
@@ -831,6 +1025,10 @@ def render_case_results(case: CaseCalculation, params: CalculatorParams) -> None
     date_cols = [
         "data da última exposição",
         "data da detecção/avaliação",
+        "data do óbito",
+        "data de sepultamento seguro/fim exposição pós-óbito",
+        "data final da exposição em vida",
+        "fim operacional da busca de contatos",
         "início real/estimado dos sintomas",
         "início provável da exposição/infecção",
         "fim provável da exposição/infecção",
@@ -839,7 +1037,6 @@ def render_case_results(case: CaseCalculation, params: CalculatorParams) -> None
         "alerta para sintomas úmidos/tardios",
         "alerta para sangramento/sinais de gravidade",
         "início da janela transmissível",
-        "fim operacional da janela transmissível",
     ]
 
     display_df = format_date_columns_br(df, date_cols)
@@ -855,7 +1052,7 @@ def render_case_results(case: CaseCalculation, params: CalculatorParams) -> None
         hover_data={"fase": True, "início": True, "fim": True},
     )
     fig.update_yaxes(autorange="reversed")
-    fig.update_layout(height=490, margin=dict(l=20, r=20, t=35, b=20), legend_title_text="Fase/marco")
+    fig.update_layout(height=520, margin=dict(l=20, r=20, t=35, b=20), legend_title_text="Fase/marco")
     st.plotly_chart(fig, use_container_width=True)
 
     payload = case_to_iso_payload(case, params)
@@ -887,7 +1084,7 @@ def render_contact_editor() -> pd.DataFrame:
 
     st.info(
         "Para dados reais, prefira identificadores ou códigos internos em vez de CPF, nome completo ou outros dados pessoais sensíveis. "
-        "Este protótipo não substitui sistema oficial de notificação, investigação ou prontuário."
+        "Inclua contatos em vida e pós-óbito, como manipulação do corpo, transporte, velório/funeral, sepultamento e limpeza/desinfecção."
     )
 
     uploaded = st.file_uploader(
@@ -919,7 +1116,7 @@ def render_contact_editor() -> pd.DataFrame:
                 help="Use 'Caso índice' ou o identificador de outro contato/caso já cadastrado.",
             ),
             "data_ultimo_contato": st.column_config.DateColumn("Data do último contato de risco", format="DD/MM/YYYY"),
-            "tipo_contato": st.column_config.TextColumn("Tipo de contato/exposição"),
+            "tipo_contato": st.column_config.SelectboxColumn("Tipo de contato/exposição", options=EXPOSURE_TYPE_OPTIONS),
             "municipio": st.column_config.TextColumn("Município/local"),
             "risco": st.column_config.SelectboxColumn("Risco", options=RISK_OPTIONS),
             "evolucao": st.column_config.SelectboxColumn("Evolução", options=EVOLUTION_OPTIONS),
@@ -1184,15 +1381,15 @@ def render_interpretation() -> None:
     st.subheader("6. Interpretação operacional")
     st.markdown(
         """
-        **1. Estrutura do cálculo:** a ferramenta separa data da última exposição, data da detecção/avaliação, condição clínica no momento da detecção, data de início dos sintomas e marcos evolutivos posteriores.
+        **1. Óbito como desfecho:** se o início dos sintomas é conhecido, a data do óbito é registrada como desfecho e não deve recalcular o início dos sintomas.
 
-        **2. Detecção em fase posterior:** se o início dos sintomas não for conhecido, a ferramenta estima retrospectivamente a data provável de início dos sintomas a partir da condição clínica observada na detecção.
+        **2. Óbito como base retrospectiva:** se o início dos sintomas é desconhecido e o óbito ocorreu após sintomas ou com informação sintomática desconhecida, a ferramenta pode estimar retrospectivamente o início dos sintomas a partir da data do óbito.
 
-        **3. Nomenclatura clínica:** sintomas secos/iniciais e sintomas úmidos/tardios são mantidos como referência operacional. Sangramento deixa de ser tratado como etapa obrigatória e passa a aparecer como **alerta para sangramento/sinais de gravidade**.
+        **3. Óbito sem sintomas conhecidos:** se não há início de sintomas conhecido nem informação clínica suficiente, a ferramenta não deve gerar uma data forte de início dos sintomas apenas pelo óbito.
 
-        **4. Exposição:** quando a data da última exposição é informada, a ferramenta calcula a janela possível de início dos sintomas a partir dessa exposição e compara com a data de início dos sintomas.
+        **4. Exposição pós-óbito:** quando houver manipulação do corpo, transporte, velório/funeral, sepultamento ou contato pós-óbito, a busca de contatos deve considerar a data de sepultamento seguro ou o encerramento da exposição pós-óbito.
 
-        **5. Sintomas:** quando a data de início dos sintomas é informada ou estimada, a ferramenta calcula retrospectivamente a janela provável de exposição/infecção.
+        **5. Sangramento:** não é tratado como etapa obrigatória. Permanece como alerta operacional para sangramento/sinais de gravidade.
 
         **6. Limite da ferramenta:** compatibilidade temporal não confirma transmissão. A interpretação final depende de investigação epidemiológica, clínica, laboratório, contexto do surto, exposição real e validação da equipe responsável.
         """
@@ -1202,33 +1399,26 @@ def render_interpretation() -> None:
         """
         ### Como as datas são calculadas
 
-        **Data da última exposição**
+        **Quando o paciente foi a óbito com início dos sintomas conhecido**
 
-        - Janela possível de início de sintomas = data da última exposição + incubação mínima até incubação máxima.
+        - Início dos sintomas = data informada.
+        - Óbito = desfecho.
+        - Fim operacional da busca de contatos = maior data entre exposição em vida, óbito e fim da exposição pós-óbito/sepultamento seguro.
 
-        **Data da detecção/avaliação**
+        **Quando o paciente foi a óbito e o início dos sintomas é desconhecido**
 
-        - Quando o início dos sintomas não é conhecido, a ferramenta estima retrospectivamente o início dos sintomas conforme a condição clínica observada:
-          - sintomas secos/iniciais: usa a própria data da detecção;
-          - sintomas úmidos/tardios: subtrai os dias configurados para sintomas úmidos/tardios;
-          - sinais de gravidade ou sangramento observado: subtrai os dias configurados para alerta de gravidade;
-          - óbito: subtrai os dias configurados entre início dos sintomas e óbito.
+        - Início estimado dos sintomas = data do óbito - dias configurados entre início dos sintomas e óbito.
+        - Janela provável de exposição/infecção = início estimado dos sintomas - incubação máxima até início estimado dos sintomas - incubação mínima.
 
-        **Data real ou estimada de início dos sintomas**
+        **Quando não há sintomas conhecidos**
 
-        - Janela provável de exposição/infecção = início dos sintomas - incubação máxima até início dos sintomas - incubação mínima.
-        - Início da janela transmissível = início dos sintomas.
-        - Fim operacional da janela transmissível = data final para busca de contatos informada pelo usuário.
-
-        **Marcos evolutivos após início dos sintomas**
-
-        - Alerta para sintomas úmidos/tardios = início dos sintomas + dias configurados para sintomas úmidos/tardios.
-        - Alerta para sangramento/sinais de gravidade = início dos sintomas + dias configurados para alerta de gravidade.
+        - A ferramenta solicita revisão dos dados e não gera uma estimativa forte apenas pela data de óbito.
 
         **Contatos**
 
         - Possível início de sintomas do contato = data do último contato + incubação mínima até incubação máxima.
         - Monitorar até = data do último contato + número de dias de monitoramento.
+        - Contatos pós-óbito podem incluir manipulação do corpo, transporte, velório/funeral, sepultamento e limpeza/desinfecção.
 
         **Padrão de datas**
 
@@ -1250,10 +1440,18 @@ def main() -> None:
         last_exposure_date,
         detection_date,
         clinical_condition,
+        case_status,
+        death_date,
+        death_after_symptoms,
+        body_manipulation,
+        funeral_or_wake,
+        body_transport,
+        post_mortem_contact,
+        safe_burial_or_post_mortem_end_date,
+        live_exposure_end_date,
         onset_known,
         known_onset_date,
         symptom_onset_status,
-        transmission_end,
     ) = render_inputs()
 
     try:
@@ -1261,17 +1459,25 @@ def main() -> None:
             last_exposure_date=last_exposure_date,
             detection_date=detection_date,
             clinical_condition_at_detection=clinical_condition,
+            case_status=case_status,
+            death_date=death_date,
+            death_after_symptoms=death_after_symptoms,
+            body_manipulation=body_manipulation,
+            funeral_or_wake=funeral_or_wake,
+            body_transport=body_transport,
+            post_mortem_contact=post_mortem_contact,
+            safe_burial_or_post_mortem_end_date=safe_burial_or_post_mortem_end_date,
+            live_exposure_end_date=live_exposure_end_date,
             onset_known=onset_known,
             known_symptom_onset_date=known_onset_date,
             symptom_onset_status=symptom_onset_status,
-            transmission_end=transmission_end,
             params=params,
         )
 
-        if case.transmission_end < case.transmission_start:
+        if case.operational_contact_search_end_date < case.transmission_start:
             st.warning(
-                "A data final para busca de contatos está anterior ao início dos sintomas. "
-                "Revisar a data final operacional."
+                "A data final operacional da busca de contatos está anterior ao início dos sintomas. "
+                "Revisar datas informadas."
             )
 
         render_case_results(case, params)
