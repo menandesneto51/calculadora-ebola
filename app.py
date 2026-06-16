@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import json
 
 import pandas as pd
@@ -124,20 +124,32 @@ def clean_text(value) -> str:
 def coerce_date(value) -> date | None:
     if value is None:
         return None
+
     try:
         if pd.isna(value):
             return None
     except Exception:
         pass
+
+    # pandas.Timestamp herda de datetime/date, por isso precisa vir ANTES
+    # de isinstance(value, date). Caso contrário, comparações entre
+    # Timestamp e datetime.date podem falhar no monitoramento de contatos.
+    if isinstance(value, pd.Timestamp):
+        return value.date()
+
+    if isinstance(value, datetime):
+        return value.date()
+
     if isinstance(value, date):
         return value
+
     try:
-        return pd.to_datetime(value, dayfirst=True).date()
-    except Exception:
-        try:
-            return pd.to_datetime(value).date()
-        except Exception:
+        parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
+        if pd.isna(parsed):
             return None
+        return parsed.date()
+    except Exception:
+        return None
 
 
 def fmt_br(value) -> str:
@@ -517,39 +529,23 @@ def case_to_iso_payload(case: CaseCalculation, params: CalculatorParams) -> dict
 # ============================================================
 
 def default_contacts_df() -> pd.DataFrame:
-    today = date.today()
-    return pd.DataFrame(
-        [
-            {
-                "identificador": "Contato 1",
-                "nome_codigo": "",
-                "caso_origem": "Caso índice",
-                "data_ultimo_contato": today,
-                "tipo_contato": "Contato domiciliar",
-                "municipio": "",
-                "risco": "Não classificado",
-                "evolucao": "Em monitoramento",
-                "data_inicio_sintomas": None,
-                "data_fim_transmissibilidade": None,
-                "data_ultima_avaliacao": today,
-                "observacao": "",
-            },
-            {
-                "identificador": "Contato 2",
-                "nome_codigo": "",
-                "caso_origem": "Caso índice",
-                "data_ultimo_contato": today,
-                "tipo_contato": "Velório/funeral",
-                "municipio": "",
-                "risco": "Não classificado",
-                "evolucao": "Em monitoramento",
-                "data_inicio_sintomas": None,
-                "data_fim_transmissibilidade": None,
-                "data_ultima_avaliacao": today,
-                "observacao": "",
-            },
-        ]
-    )
+    # A ferramenta não deve criar contatos fictícios automaticamente.
+    # Sem planilha importada ou digitação manual, o painel deve permanecer zerado.
+    columns = [
+        "identificador",
+        "nome_codigo",
+        "caso_origem",
+        "data_ultimo_contato",
+        "tipo_contato",
+        "municipio",
+        "risco",
+        "evolucao",
+        "data_inicio_sintomas",
+        "data_fim_transmissibilidade",
+        "data_ultima_avaliacao",
+        "observacao",
+    ]
+    return pd.DataFrame(columns=columns)
 
 
 def normalize_contacts_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -584,7 +580,7 @@ def normalize_contacts_df(df: pd.DataFrame) -> pd.DataFrame:
         "data_fim_transmissibilidade",
         "data_ultima_avaliacao",
     ]:
-        normalized[col] = normalized[col].apply(coerce_date)
+        normalized[col] = normalized[col].apply(coerce_date).astype("object")
 
     normalized = normalized[normalized["identificador"] != ""].copy()
     normalized = normalized.drop_duplicates(subset=["identificador"], keep="first").reset_index(drop=True)
@@ -645,10 +641,15 @@ def is_contact_compatible_with_source(
     case: CaseCalculation,
 ) -> tuple[str, str]:
     source_id = clean_text(source_id) or "Caso índice"
+    last_contact = coerce_date(last_contact)
+    if last_contact is None:
+        return "Data inválida/ausente", "-"
 
     if source_id == "Caso índice":
-        if case.transmission_start <= last_contact <= case.operational_contact_search_end_date:
-            return "Sim", f"{fmt_br(case.transmission_start)} a {fmt_br(case.operational_contact_search_end_date)}"
+        transmission_start = coerce_date(case.transmission_start)
+        operational_end = coerce_date(case.operational_contact_search_end_date)
+        if transmission_start is not None and operational_end is not None and transmission_start <= last_contact <= operational_end:
+            return "Sim", f"{fmt_br(transmission_start)} a {fmt_br(operational_end)}"
         return "Não", "-"
 
     source = contacts_by_id.get(source_id)
@@ -661,7 +662,9 @@ def is_contact_compatible_with_source(
     if source_onset is None or source_end is None:
         return "Não avaliado", "Informe início de sintomas e fim de transmissibilidade do caso-origem"
 
-    if source_onset <= last_contact <= source_end:
+    source_onset = coerce_date(source_onset)
+    source_end = coerce_date(source_end)
+    if source_onset is not None and source_end is not None and source_onset <= last_contact <= source_end:
         return "Sim", f"{fmt_br(source_onset)} a {fmt_br(source_end)}"
 
     return "Não", "-"
@@ -719,6 +722,20 @@ def evaluate_contacts(
             contacts_by_id=contacts_by_id,
             case=case,
         )
+
+        last_contact = coerce_date(last_contact)
+        if last_contact is None:
+            evaluated_rows.append(
+                {
+                    **base_row,
+                    "compatível com janela transmissível?": "Data inválida/ausente",
+                    "hipóteses/janela compatível": "-",
+                    "possível início de sintomas": "-",
+                    "monitorar até": "-",
+                    "situação do prazo": "Não avaliado",
+                }
+            )
+            continue
 
         symptom_window_start = last_contact + timedelta(days=params.min_incubation_days)
         symptom_window_end = last_contact + timedelta(days=params.max_incubation_days)
@@ -1083,8 +1100,10 @@ def render_contact_editor() -> pd.DataFrame:
     st.subheader("3. Cadastro de contatos e evolução")
 
     st.info(
-        "Para dados reais, prefira identificadores ou códigos internos em vez de CPF, nome completo ou outros dados pessoais sensíveis. "
-        "Inclua contatos em vida e pós-óbito, como manipulação do corpo, transporte, velório/funeral, sepultamento e limpeza/desinfecção."
+        "Nenhum contato é criado automaticamente. O painel ficará zerado até que uma planilha seja importada "
+        "ou contatos sejam inseridos manualmente. Para dados reais, prefira identificadores ou códigos internos "
+        "em vez de CPF, nome completo ou outros dados pessoais sensíveis. Inclua contatos em vida e pós-óbito, "
+        "como manipulação do corpo, transporte, velório/funeral, sepultamento e limpeza/desinfecção."
     )
 
     uploaded = st.file_uploader(
@@ -1148,7 +1167,7 @@ def render_contacts_analysis(
     evaluated = evaluate_contacts(contacts_df, case, params)
 
     if evaluated.empty:
-        st.info("Inclua ao menos um contato com identificador para calcular o monitoramento.")
+        st.info("Nenhum contato carregado. Importe uma planilha ou inclua contatos manualmente para gerar o painel de monitoramento.")
         return evaluated
 
     total = len(evaluated)
