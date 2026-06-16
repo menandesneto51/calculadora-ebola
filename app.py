@@ -1216,6 +1216,7 @@ def render_contacts_analysis(
     return evaluated
 
 
+
 def render_chain_graph(contacts_df: pd.DataFrame) -> None:
     contacts = normalize_contacts_df(contacts_df)
     if contacts.empty:
@@ -1225,18 +1226,74 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
     edges = make_chain_edges(contacts)
     generations = calculate_contact_generation(contacts)
 
+    # ---------------------------
+    # Filtros visuais
+    # ---------------------------
+    all_generations = sorted(set(generations.values())) if generations else [0]
+    all_statuses = sorted(
+        {
+            clean_text(v)
+            for v in contacts.get("evolucao", pd.Series(dtype=object)).tolist()
+            if clean_text(v)
+        }
+    )
+    if "Caso índice" not in all_statuses:
+        all_statuses = ["Caso índice"] + all_statuses
+
+    post_mortem_types = {
+        "Manipulação do corpo",
+        "Velório/funeral",
+        "Sepultamento",
+        "Limpeza/desinfecção",
+    }
+
+    c1, c2, c3 = st.columns([1.2, 1.4, 1.1])
+    with c1:
+        selected_generations = st.multiselect(
+            "Gerações visíveis",
+            options=all_generations,
+            default=all_generations,
+            help="Filtre a visualização por geração epidemiológica.",
+        )
+    with c2:
+        selected_statuses = st.multiselect(
+            "Evoluções visíveis",
+            options=all_statuses,
+            default=all_statuses,
+            help="Filtre quais evoluções devem permanecer no grafo.",
+        )
+    with c3:
+        show_only_relevant = st.checkbox(
+            "Destacar apenas sintomáticos/suspeitos/confirmados/óbito",
+            value=False,
+            help="Quando marcado, mantém no grafo apenas nós com maior relevância clínica, além do caso índice.",
+        )
+        highlight_post_mortem = st.checkbox(
+            "Destacar pós-óbito",
+            value=True,
+            help="Aplica borda reforçada aos contatos relacionados a manipulação do corpo, velório/funeral, sepultamento ou limpeza pós-óbito.",
+        )
+
     nodes = {"Caso índice"}
     for _, row in contacts.iterrows():
-        nodes.add(clean_text(row.get("identificador")))
-        nodes.add(clean_text(row.get("caso_origem")) or "Caso índice")
+        ident = clean_text(row.get("identificador"))
+        parent = clean_text(row.get("caso_origem")) or "Caso índice"
+        if ident:
+            nodes.add(ident)
+        if parent:
+            nodes.add(parent)
     nodes = {n for n in nodes if n}
 
     meta = {
         "Caso índice": {
-            "label": "Caso índice",
+            "label_short": "Caso índice",
             "evolucao": "Caso índice",
             "municipio": "",
             "risco": "",
+            "tipo_contato": "",
+            "data_ultimo_contato": None,
+            "caso_origem": "",
+            "pos_obito": False,
         }
     }
 
@@ -1244,132 +1301,255 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
         ident = clean_text(row.get("identificador"))
         if not ident:
             continue
+        tipo_contato = clean_text(row.get("tipo_contato"))
         meta[ident] = {
-            "label": f"{ident}<br>{clean_text(row.get('evolucao')) or 'Em monitoramento'}",
-            "evolucao": clean_text(row.get("evolucao")),
+            "label_short": ident,
+            "evolucao": clean_text(row.get("evolucao")) or "Em monitoramento",
             "municipio": clean_text(row.get("municipio")),
             "risco": clean_text(row.get("risco")),
+            "tipo_contato": tipo_contato,
+            "data_ultimo_contato": coerce_date(row.get("data_ultimo_contato")),
+            "caso_origem": clean_text(row.get("caso_origem")) or "Caso índice",
+            "pos_obito": tipo_contato in post_mortem_types,
         }
 
-    max_gen = max(generations.values()) if generations else 1
-    positions = {}
-    for gen in range(max_gen + 1):
-        gen_nodes = sorted([n for n in nodes if generations.get(n, 1) == gen])
-        for idx, node in enumerate(gen_nodes):
-            positions[node] = (gen, len(gen_nodes) - idx)
+    # Nó relevante do ponto de vista clínico/epidemiológico
+    relevant_statuses = {"Sintomático", "Suspeito", "Confirmado", "Óbito"}
+    visible_nodes = set()
+    for node in nodes:
+        generation = generations.get(node, 1)
+        item = meta.get(node, {})
+        evolution = item.get("evolucao", "Origem externa")
+        if selected_generations and generation not in selected_generations:
+            continue
+        if selected_statuses and evolution not in selected_statuses:
+            continue
+        if show_only_relevant and node != "Caso índice" and evolution not in relevant_statuses:
+            continue
+        visible_nodes.add(node)
 
-    for idx, node in enumerate(sorted(nodes)):
+    # Mantém pais de nós visíveis para preservar legibilidade da cadeia.
+    parent_lookup = {
+        clean_text(r.get("identificador")): clean_text(r.get("caso_origem")) or "Caso índice"
+        for _, r in contacts.iterrows()
+        if clean_text(r.get("identificador"))
+    }
+    expanded = True
+    while expanded:
+        expanded = False
+        for node in list(visible_nodes):
+            parent = parent_lookup.get(node)
+            if parent and parent not in visible_nodes:
+                visible_nodes.add(parent)
+                expanded = True
+
+    if not visible_nodes:
+        st.info("Os filtros atuais não exibem nenhum nó.")
+        return
+
+    visible_edges = edges[
+        edges["caso-origem"].isin(visible_nodes)
+        & edges["contato/caso exposto"].isin(visible_nodes)
+    ].copy()
+
+    # ---------------------------
+    # Posicionamento hierárquico por geração
+    # ---------------------------
+    visible_generations = sorted({generations.get(n, 1) for n in visible_nodes})
+    positions = {}
+    max_nodes_in_col = 1
+
+    for gen in visible_generations:
+        gen_nodes = sorted(
+            [n for n in visible_nodes if generations.get(n, 1) == gen],
+            key=lambda n: (
+                0 if n == "Caso índice" else 1,
+                meta.get(n, {}).get("evolucao", ""),
+                n,
+            ),
+        )
+        if not gen_nodes:
+            continue
+        max_nodes_in_col = max(max_nodes_in_col, len(gen_nodes))
+        spacing = 1.6
+        center = (len(gen_nodes) - 1) / 2
+        for idx, node in enumerate(gen_nodes):
+            x = gen * 4.0
+            y = (center - idx) * spacing
+            positions[node] = (x, y)
+
+    # fallback
+    for idx, node in enumerate(sorted(visible_nodes)):
         if node not in positions:
-            positions[node] = (generations.get(node, 1), idx + 1)
+            positions[node] = (generations.get(node, 1) * 4.0, -idx * 1.6)
+
+    # ---------------------------
+    # Estilos visuais
+    # ---------------------------
+    status_styles = {
+        "Caso índice": {"color": "#1F4E79", "symbol": "star", "size": 28},
+        "Em monitoramento": {"color": "#5DADE2", "symbol": "circle", "size": 18},
+        "Assintomático": {"color": "#A6ACAF", "symbol": "circle", "size": 18},
+        "Sintomático": {"color": "#E67E22", "symbol": "diamond", "size": 20},
+        "Suspeito": {"color": "#F1C40F", "symbol": "diamond", "size": 22},
+        "Confirmado": {"color": "#C0392B", "symbol": "square", "size": 22},
+        "Descartado": {"color": "#27AE60", "symbol": "x", "size": 20},
+        "Óbito": {"color": "#7B241C", "symbol": "cross", "size": 24},
+        "Encerrado": {"color": "#58D68D", "symbol": "circle", "size": 18},
+        "Origem externa": {"color": "#7F8C8D", "symbol": "circle", "size": 18},
+    }
 
     fig = go.Figure()
 
-    edge_x = []
-    edge_y = []
-    for _, row in edges.iterrows():
-        parent = row["caso-origem"]
-        child = row["contato/caso exposto"]
-        if parent not in positions or child not in positions:
-            continue
-        x0, y0 = positions[parent]
-        x1, y1 = positions[child]
-        edge_x += [x0, x1, None]
-        edge_y += [y0, y1, None]
-
-    fig.add_trace(
-        go.Scatter(
-            x=edge_x,
-            y=edge_y,
-            mode="lines",
-            line=dict(width=1),
-            hoverinfo="skip",
-            showlegend=False,
-        )
-    )
-
-    status_symbol = {
-        "Caso índice": "star",
-        "Em monitoramento": "circle",
-        "Assintomático": "circle",
-        "Sintomático": "diamond",
-        "Suspeito": "diamond",
-        "Confirmado": "square",
-        "Descartado": "x",
-        "Óbito": "cross",
-        "Encerrado": "circle",
-    }
-
-    node_x, node_y, texts, hovers, symbols, sizes = [], [], [], [], [], []
-    for node in sorted(nodes, key=lambda n: (positions[n][0], positions[n][1], n)):
-        x, y = positions[node]
-        item = meta.get(node, {"label": node, "evolucao": "Origem externa", "municipio": "", "risco": ""})
-        evolution = item.get("evolucao") or "Em monitoramento"
-        node_x.append(x)
-        node_y.append(y)
-        texts.append(item.get("label", node))
-        hovers.append(
-            f"<b>{node}</b><br>"
-            f"Evolução: {evolution}<br>"
-            f"Município: {item.get('municipio', '')}<br>"
-            f"Risco: {item.get('risco', '')}<br>"
-            f"Geração: {generations.get(node, '-')}"
-        )
-        symbols.append(status_symbol.get(evolution, "circle"))
-        sizes.append(28 if node == "Caso índice" else 20)
-
-    fig.add_trace(
-        go.Scatter(
-            x=node_x,
-            y=node_y,
-            mode="markers+text",
-            text=texts,
-            textposition="bottom center",
-            hovertext=hovers,
-            hoverinfo="text",
-            marker=dict(size=sizes, symbol=symbols, line=dict(width=1)),
-            showlegend=False,
-        )
-    )
-
-    for _, row in edges.iterrows():
-        parent = row["caso-origem"]
-        child = row["contato/caso exposto"]
-        if parent not in positions or child not in positions:
-            continue
-        x0, y0 = positions[parent]
-        x1, y1 = positions[child]
+    # Colunas de geração (fundo visual)
+    y_extent = max(3.0, max_nodes_in_col * 1.2)
+    for gen in visible_generations:
+        x = gen * 4.0
+        fig.add_vline(x=x, line_width=1, line_dash="dot", line_color="rgba(120,120,120,0.25)")
         fig.add_annotation(
-            x=x1,
-            y=y1,
-            ax=x0,
-            ay=y0,
-            xref="x",
-            yref="y",
-            axref="x",
-            ayref="y",
-            showarrow=True,
-            arrowhead=3,
-            arrowsize=1,
-            arrowwidth=1,
-            opacity=0.45,
+            x=x,
+            y=y_extent + 1.2,
+            text=f"<b>Geração {gen}</b>" if gen > 0 else "<b>Caso índice</b>",
+            showarrow=False,
+            font=dict(size=13, color="#566573"),
         )
+
+    # Arestas
+    for _, row in visible_edges.iterrows():
+        parent = row["caso-origem"]
+        child = row["contato/caso exposto"]
+        if parent not in positions or child not in positions:
+            continue
+
+        x0, y0 = positions[parent]
+        x1, y1 = positions[child]
+
+        edge_hover = (
+            f"<b>{parent}</b> ➜ <b>{child}</b><br>"
+            f"Data do contato: {fmt_br(coerce_date(row.get('data do contato')))}<br>"
+            f"Tipo de contato: {clean_text(row.get('tipo de contato')) or '-'}<br>"
+            f"Município: {clean_text(row.get('município')) or '-'}<br>"
+            f"Evolução do nó exposto: {clean_text(row.get('evolução')) or '-'}"
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=[x0, x1],
+                y=[y0, y1],
+                mode="lines",
+                line=dict(width=1.2, color="rgba(52, 152, 219, 0.55)"),
+                hoverinfo="text",
+                text=[edge_hover, edge_hover],
+                showlegend=False,
+            )
+        )
+
+    # Nós por status para ter legenda limpa
+    ordered_statuses = [
+        "Caso índice",
+        "Em monitoramento",
+        "Assintomático",
+        "Sintomático",
+        "Suspeito",
+        "Confirmado",
+        "Descartado",
+        "Óbito",
+        "Encerrado",
+        "Origem externa",
+    ]
+
+    for status in ordered_statuses:
+        node_subset = [
+            n
+            for n in sorted(visible_nodes, key=lambda n: (generations.get(n, 1), positions[n][1], n))
+            if (meta.get(n, {}).get("evolucao", "Origem externa") == status)
+        ]
+        if not node_subset:
+            continue
+
+        xs, ys, texts, hovers, sizes, line_colors, line_widths = [], [], [], [], [], [], []
+        style = status_styles.get(status, status_styles["Origem externa"])
+
+        for node in node_subset:
+            item = meta.get(node, {})
+            xs.append(positions[node][0])
+            ys.append(positions[node][1])
+            texts.append(item.get("label_short", node))
+            sizes.append(style["size"])
+
+            is_post_mortem = bool(item.get("pos_obito", False))
+            line_colors.append("#C0392B" if highlight_post_mortem and is_post_mortem else "#FFFFFF")
+            line_widths.append(2.8 if highlight_post_mortem and is_post_mortem else 1.2)
+
+            post_mortem_text = "Sim" if is_post_mortem else "Não"
+            hovers.append(
+                f"<b>{node}</b><br>"
+                f"Evolução: {item.get('evolucao', '-') or '-'}<br>"
+                f"Risco: {item.get('risco', '-') or '-'}<br>"
+                f"Município: {item.get('municipio', '-') or '-'}<br>"
+                f"Tipo de contato: {item.get('tipo_contato', '-') or '-'}<br>"
+                f"Caso-origem: {item.get('caso_origem', '-') or '-'}<br>"
+                f"Data do último contato: {fmt_br(item.get('data_ultimo_contato'))}<br>"
+                f"Geração: {generations.get(node, '-')}<br>"
+                f"Pós-óbito: {post_mortem_text}"
+            )
+
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="markers+text",
+                text=texts,
+                textposition="middle right",
+                textfont=dict(size=12, color="#2C3E50"),
+                hovertext=hovers,
+                hoverinfo="text",
+                name=status,
+                marker=dict(
+                    size=sizes,
+                    color=style["color"],
+                    symbol=style["symbol"],
+                    line=dict(color=line_colors, width=line_widths),
+                ),
+            )
+        )
+
+    figure_height = max(420, 170 + max_nodes_in_col * 42)
 
     fig.update_layout(
-        height=520,
-        margin=dict(l=20, r=20, t=30, b=20),
+        height=figure_height,
+        margin=dict(l=30, r=30, t=55, b=30),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        hovermode="closest",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            title_text="Evolução",
+        ),
         xaxis=dict(
             title="Geração epidemiológica possível",
-            tickmode="array",
-            tickvals=list(range(max_gen + 1)),
-            ticktext=[f"Geração {i}" if i > 0 else "Caso índice" for i in range(max_gen + 1)],
-            showgrid=True,
+            showgrid=False,
             zeroline=False,
+            showticklabels=False,
+            range=[min(visible_generations) * 4.0 - 1.0, max(visible_generations) * 4.0 + 2.0],
         ),
-        yaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
-        plot_bgcolor="white",
+        yaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+        ),
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    st.caption(
+        "Melhorias visuais aplicadas: distribuição por geração, rótulo curto (apenas ID), legenda por evolução, "
+        "detalhes completos no hover e destaque visual opcional para contatos pós-óbito."
+    )
 
 
 def render_chain_section(contacts_df: pd.DataFrame) -> None:
