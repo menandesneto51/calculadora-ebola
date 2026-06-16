@@ -1217,6 +1217,7 @@ def render_contacts_analysis(
 
 
 
+
 def render_chain_graph(contacts_df: pd.DataFrame) -> None:
     contacts = normalize_contacts_df(contacts_df)
     if contacts.empty:
@@ -1225,54 +1226,8 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
 
     edges = make_chain_edges(contacts)
     generations = calculate_contact_generation(contacts)
-
-    # ---------------------------
-    # Filtros visuais
-    # ---------------------------
-    all_generations = sorted(set(generations.values())) if generations else [0]
-    all_statuses = sorted(
-        {
-            clean_text(v)
-            for v in contacts.get("evolucao", pd.Series(dtype=object)).tolist()
-            if clean_text(v)
-        }
-    )
-    if "Caso índice" not in all_statuses:
-        all_statuses = ["Caso índice"] + all_statuses
-
-    post_mortem_types = {
-        "Manipulação do corpo",
-        "Velório/funeral",
-        "Sepultamento",
-        "Limpeza/desinfecção",
-    }
-
-    c1, c2, c3 = st.columns([1.2, 1.4, 1.1])
-    with c1:
-        selected_generations = st.multiselect(
-            "Gerações visíveis",
-            options=all_generations,
-            default=all_generations,
-            help="Filtre a visualização por geração epidemiológica.",
-        )
-    with c2:
-        selected_statuses = st.multiselect(
-            "Evoluções visíveis",
-            options=all_statuses,
-            default=all_statuses,
-            help="Filtre quais evoluções devem permanecer no grafo.",
-        )
-    with c3:
-        show_only_relevant = st.checkbox(
-            "Destacar apenas sintomáticos/suspeitos/confirmados/óbito",
-            value=False,
-            help="Quando marcado, mantém no grafo apenas nós com maior relevância clínica, além do caso índice.",
-        )
-        highlight_post_mortem = st.checkbox(
-            "Destacar pós-óbito",
-            value=True,
-            help="Aplica borda reforçada aos contatos relacionados a manipulação do corpo, velório/funeral, sepultamento ou limpeza pós-óbito.",
-        )
+    post_mortem_types = {"Manipulação do corpo", "Velório/funeral", "Sepultamento", "Limpeza/desinfecção"}
+    relevant_statuses = {"Sintomático", "Suspeito", "Confirmado", "Óbito"}
 
     nodes = {"Caso índice"}
     for _, row in contacts.iterrows():
@@ -1294,6 +1249,8 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
             "data_ultimo_contato": None,
             "caso_origem": "",
             "pos_obito": False,
+            "is_group": False,
+            "members": [],
         }
     }
 
@@ -1311,29 +1268,90 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
             "data_ultimo_contato": coerce_date(row.get("data_ultimo_contato")),
             "caso_origem": clean_text(row.get("caso_origem")) or "Caso índice",
             "pos_obito": tipo_contato in post_mortem_types,
+            "is_group": False,
+            "members": [],
         }
 
-    # Nó relevante do ponto de vista clínico/epidemiológico
-    relevant_statuses = {"Sintomático", "Suspeito", "Confirmado", "Óbito"}
+    children_by_parent = {}
+    parent_lookup = {}
+    for _, row in edges.iterrows():
+        parent = clean_text(row.get("caso-origem")) or "Caso índice"
+        child = clean_text(row.get("contato/caso exposto"))
+        if child:
+            parent_lookup[child] = parent
+            children_by_parent.setdefault(parent, set()).add(child)
+
+    all_generations = sorted(set(generations.values())) if generations else [0]
+    all_statuses = sorted({meta.get(n, {}).get("evolucao", "Origem externa") for n in nodes})
+    if "Caso índice" in all_statuses:
+        all_statuses = ["Caso índice"] + [s for s in all_statuses if s != "Caso índice"]
+
+    c1, c2, c3 = st.columns([1.2, 1.4, 1.3])
+    with c1:
+        selected_generations = st.multiselect(
+            "Gerações visíveis",
+            options=all_generations,
+            default=all_generations,
+            help="Filtre a visualização por geração epidemiológica.",
+        )
+        hide_low_priority = st.checkbox(
+            "Ocultar assintomáticos/encerrados/descartados",
+            value=False,
+            help="Remove nós com menor prioridade visual, preservando os pais necessários para leitura da cadeia.",
+        )
+
+    with c2:
+        selected_statuses = st.multiselect(
+            "Evoluções visíveis",
+            options=all_statuses,
+            default=all_statuses,
+            help="Filtre quais evoluções devem permanecer no grafo.",
+        )
+        show_only_relevant = st.checkbox(
+            "Mostrar apenas sintomáticos/suspeitos/confirmados/óbito",
+            value=False,
+            help="Mantém no grafo apenas nós com maior relevância clínica, além do caso índice e pais necessários.",
+        )
+
+    with c3:
+        highlight_post_mortem = st.checkbox(
+            "Destacar pós-óbito",
+            value=True,
+            help="Aplica borda reforçada aos contatos relacionados a manipulação do corpo, velório/funeral, sepultamento ou limpeza pós-óbito.",
+        )
+        auto_group = st.checkbox(
+            "Agrupar contatos numerosos",
+            value=len(contacts) >= 18,
+            help="Agrupa contatos de menor prioridade que tenham o mesmo caso-origem, geração, evolução e tipo de exposição.",
+        )
+        group_threshold = st.slider(
+            "Agrupar a partir de quantos contatos",
+            min_value=3,
+            max_value=20,
+            value=5,
+            step=1,
+            help="Número mínimo de contatos semelhantes para criar um nó agrupado.",
+        )
+
+    low_priority_statuses = {"Em monitoramento", "Assintomático", "Encerrado", "Descartado"}
+    hidden_statuses = {"Assintomático", "Encerrado", "Descartado"}
+
     visible_nodes = set()
     for node in nodes:
         generation = generations.get(node, 1)
         item = meta.get(node, {})
         evolution = item.get("evolucao", "Origem externa")
+
         if selected_generations and generation not in selected_generations:
             continue
         if selected_statuses and evolution not in selected_statuses:
+            continue
+        if hide_low_priority and node != "Caso índice" and evolution in hidden_statuses:
             continue
         if show_only_relevant and node != "Caso índice" and evolution not in relevant_statuses:
             continue
         visible_nodes.add(node)
 
-    # Mantém pais de nós visíveis para preservar legibilidade da cadeia.
-    parent_lookup = {
-        clean_text(r.get("identificador")): clean_text(r.get("caso_origem")) or "Caso índice"
-        for _, r in contacts.iterrows()
-        if clean_text(r.get("identificador"))
-    }
     expanded = True
     while expanded:
         expanded = False
@@ -1352,42 +1370,121 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
         & edges["contato/caso exposto"].isin(visible_nodes)
     ].copy()
 
-    # ---------------------------
-    # Posicionamento hierárquico por geração
-    # ---------------------------
-    visible_generations = sorted({generations.get(n, 1) for n in visible_nodes})
+    final_nodes = set(visible_nodes)
+    final_edges = []
+
+    if auto_group:
+        group_candidates = {}
+        for node in list(visible_nodes):
+            item = meta.get(node, {})
+            if node == "Caso índice":
+                continue
+            if item.get("evolucao") not in low_priority_statuses:
+                continue
+            if item.get("pos_obito"):
+                continue
+            if node in children_by_parent and children_by_parent.get(node):
+                continue
+
+            parent = parent_lookup.get(node, item.get("caso_origem") or "Caso índice")
+            if not parent or parent not in visible_nodes:
+                continue
+
+            key = (
+                parent,
+                generations.get(node, 1),
+                item.get("evolucao", "Origem externa"),
+                item.get("tipo_contato", "") or "Sem tipo informado",
+            )
+            group_candidates.setdefault(key, []).append(node)
+
+        grouped_nodes = set()
+        group_index = 1
+        for key, members in group_candidates.items():
+            if len(members) < group_threshold:
+                continue
+            parent, generation, evolution, tipo = key
+            group_id = f"Grupo {group_index:02d} — {evolution} ({len(members)})"
+            group_index += 1
+
+            meta[group_id] = {
+                "label_short": f"Grupo n={len(members)}",
+                "evolucao": evolution,
+                "municipio": "Múltiplos",
+                "risco": "Múltiplos",
+                "tipo_contato": tipo,
+                "data_ultimo_contato": None,
+                "caso_origem": parent,
+                "pos_obito": False,
+                "is_group": True,
+                "members": sorted(members),
+            }
+            generations[group_id] = generation
+            final_nodes.add(group_id)
+            final_edges.append(
+                {
+                    "caso-origem": parent,
+                    "contato/caso exposto": group_id,
+                    "data do contato": None,
+                    "tipo de contato": tipo,
+                    "município": "Múltiplos",
+                    "evolução": evolution,
+                    "agrupado": True,
+                }
+            )
+
+            for member in members:
+                grouped_nodes.add(member)
+                final_nodes.discard(member)
+
+        for _, row in visible_edges.iterrows():
+            child = clean_text(row.get("contato/caso exposto"))
+            parent = clean_text(row.get("caso-origem"))
+            if child in grouped_nodes or parent in grouped_nodes:
+                continue
+            final_edges.append({**row.to_dict(), "agrupado": False})
+    else:
+        final_edges = [{**row.to_dict(), "agrupado": False} for _, row in visible_edges.iterrows()]
+
+    final_edges = [
+        e for e in final_edges
+        if e.get("caso-origem") in final_nodes and e.get("contato/caso exposto") in final_nodes
+    ]
+
+    if not final_nodes:
+        st.info("Os filtros atuais não exibem nenhum nó após agrupamento.")
+        return
+
+    visible_generations = sorted({generations.get(n, 1) for n in final_nodes})
     positions = {}
     max_nodes_in_col = 1
 
     for gen in visible_generations:
         gen_nodes = sorted(
-            [n for n in visible_nodes if generations.get(n, 1) == gen],
+            [n for n in final_nodes if generations.get(n, 1) == gen],
             key=lambda n: (
                 0 if n == "Caso índice" else 1,
                 meta.get(n, {}).get("evolucao", ""),
+                meta.get(n, {}).get("tipo_contato", ""),
                 n,
             ),
         )
         if not gen_nodes:
             continue
         max_nodes_in_col = max(max_nodes_in_col, len(gen_nodes))
-        spacing = 1.6
+        spacing = 1.8
         center = (len(gen_nodes) - 1) / 2
         for idx, node in enumerate(gen_nodes):
-            x = gen * 4.0
+            x = gen * 4.2
             y = (center - idx) * spacing
             positions[node] = (x, y)
 
-    # fallback
-    for idx, node in enumerate(sorted(visible_nodes)):
+    for idx, node in enumerate(sorted(final_nodes)):
         if node not in positions:
-            positions[node] = (generations.get(node, 1) * 4.0, -idx * 1.6)
+            positions[node] = (generations.get(node, 1) * 4.2, -idx * 1.8)
 
-    # ---------------------------
-    # Estilos visuais
-    # ---------------------------
     status_styles = {
-        "Caso índice": {"color": "#1F4E79", "symbol": "star", "size": 28},
+        "Caso índice": {"color": "#1F4E79", "symbol": "star", "size": 30},
         "Em monitoramento": {"color": "#5DADE2", "symbol": "circle", "size": 18},
         "Assintomático": {"color": "#A6ACAF", "symbol": "circle", "size": 18},
         "Sintomático": {"color": "#E67E22", "symbol": "diamond", "size": 20},
@@ -1400,11 +1497,9 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
     }
 
     fig = go.Figure()
-
-    # Colunas de geração (fundo visual)
-    y_extent = max(3.0, max_nodes_in_col * 1.2)
+    y_extent = max(3.0, max_nodes_in_col * 1.25)
     for gen in visible_generations:
-        x = gen * 4.0
+        x = gen * 4.2
         fig.add_vline(x=x, line_width=1, line_dash="dot", line_color="rgba(120,120,120,0.25)")
         fig.add_annotation(
             x=x,
@@ -1414,22 +1509,23 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
             font=dict(size=13, color="#566573"),
         )
 
-    # Arestas
-    for _, row in visible_edges.iterrows():
-        parent = row["caso-origem"]
-        child = row["contato/caso exposto"]
+    for edge in final_edges:
+        parent = edge["caso-origem"]
+        child = edge["contato/caso exposto"]
         if parent not in positions or child not in positions:
             continue
 
         x0, y0 = positions[parent]
         x1, y1 = positions[child]
+        grouped = bool(edge.get("agrupado", False))
 
         edge_hover = (
             f"<b>{parent}</b> ➜ <b>{child}</b><br>"
-            f"Data do contato: {fmt_br(coerce_date(row.get('data do contato')))}<br>"
-            f"Tipo de contato: {clean_text(row.get('tipo de contato')) or '-'}<br>"
-            f"Município: {clean_text(row.get('município')) or '-'}<br>"
-            f"Evolução do nó exposto: {clean_text(row.get('evolução')) or '-'}"
+            f"Tipo de contato: {clean_text(edge.get('tipo de contato')) or '-'}<br>"
+            f"Data do contato: {fmt_br(coerce_date(edge.get('data do contato')))}<br>"
+            f"Município: {clean_text(edge.get('município')) or '-'}<br>"
+            f"Evolução do nó exposto: {clean_text(edge.get('evolução')) or '-'}<br>"
+            f"Agrupado: {'Sim' if grouped else 'Não'}"
         )
 
         fig.add_trace(
@@ -1437,51 +1533,52 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
                 x=[x0, x1],
                 y=[y0, y1],
                 mode="lines",
-                line=dict(width=1.2, color="rgba(52, 152, 219, 0.55)"),
+                line=dict(
+                    width=2.2 if grouped else 1.2,
+                    color="rgba(52, 152, 219, 0.45)" if not grouped else "rgba(127, 140, 141, 0.55)",
+                    dash="dot" if grouped else "solid",
+                ),
                 hoverinfo="text",
                 text=[edge_hover, edge_hover],
                 showlegend=False,
             )
         )
 
-    # Nós por status para ter legenda limpa
     ordered_statuses = [
-        "Caso índice",
-        "Em monitoramento",
-        "Assintomático",
-        "Sintomático",
-        "Suspeito",
-        "Confirmado",
-        "Descartado",
-        "Óbito",
-        "Encerrado",
-        "Origem externa",
+        "Caso índice", "Em monitoramento", "Assintomático", "Sintomático", "Suspeito",
+        "Confirmado", "Descartado", "Óbito", "Encerrado", "Origem externa"
     ]
 
     for status in ordered_statuses:
         node_subset = [
-            n
-            for n in sorted(visible_nodes, key=lambda n: (generations.get(n, 1), positions[n][1], n))
-            if (meta.get(n, {}).get("evolucao", "Origem externa") == status)
+            n for n in sorted(final_nodes, key=lambda n: (generations.get(n, 1), -positions[n][1], n))
+            if meta.get(n, {}).get("evolucao", "Origem externa") == status
         ]
         if not node_subset:
             continue
 
-        xs, ys, texts, hovers, sizes, line_colors, line_widths = [], [], [], [], [], [], []
         style = status_styles.get(status, status_styles["Origem externa"])
+        xs, ys, texts, hovers, sizes, line_colors, line_widths, symbols = [], [], [], [], [], [], [], []
 
         for node in node_subset:
             item = meta.get(node, {})
             xs.append(positions[node][0])
             ys.append(positions[node][1])
             texts.append(item.get("label_short", node))
-            sizes.append(style["size"])
 
+            is_group = bool(item.get("is_group", False))
             is_post_mortem = bool(item.get("pos_obito", False))
-            line_colors.append("#C0392B" if highlight_post_mortem and is_post_mortem else "#FFFFFF")
-            line_widths.append(2.8 if highlight_post_mortem and is_post_mortem else 1.2)
 
-            post_mortem_text = "Sim" if is_post_mortem else "Não"
+            sizes.append(max(style["size"], 24) if is_group else style["size"])
+            symbols.append("square" if is_group else style["symbol"])
+            line_colors.append("#C0392B" if highlight_post_mortem and is_post_mortem else "#FFFFFF")
+            line_widths.append(3.2 if highlight_post_mortem and is_post_mortem else (2.2 if is_group else 1.2))
+
+            members = item.get("members", [])
+            members_text = ", ".join(members[:12])
+            if len(members) > 12:
+                members_text += f" ... (+{len(members)-12})"
+
             hovers.append(
                 f"<b>{node}</b><br>"
                 f"Evolução: {item.get('evolucao', '-') or '-'}<br>"
@@ -1491,7 +1588,9 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
                 f"Caso-origem: {item.get('caso_origem', '-') or '-'}<br>"
                 f"Data do último contato: {fmt_br(item.get('data_ultimo_contato'))}<br>"
                 f"Geração: {generations.get(node, '-')}<br>"
-                f"Pós-óbito: {post_mortem_text}"
+                f"Pós-óbito: {'Sim' if is_post_mortem else 'Não'}<br>"
+                f"Agrupado: {'Sim' if is_group else 'Não'}"
+                + (f"<br>Integrantes: {members_text}" if is_group else "")
             )
 
         fig.add_trace(
@@ -1508,17 +1607,17 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
                 marker=dict(
                     size=sizes,
                     color=style["color"],
-                    symbol=style["symbol"],
+                    symbol=symbols,
                     line=dict(color=line_colors, width=line_widths),
                 ),
             )
         )
 
-    figure_height = max(420, 170 + max_nodes_in_col * 42)
+    figure_height = max(460, 180 + max_nodes_in_col * 46)
 
     fig.update_layout(
         height=figure_height,
-        margin=dict(l=30, r=30, t=55, b=30),
+        margin=dict(l=30, r=30, t=60, b=35),
         plot_bgcolor="white",
         paper_bgcolor="white",
         hovermode="closest",
@@ -1535,20 +1634,92 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
             showgrid=False,
             zeroline=False,
             showticklabels=False,
-            range=[min(visible_generations) * 4.0 - 1.0, max(visible_generations) * 4.0 + 2.0],
+            range=[min(visible_generations) * 4.2 - 1.0, max(visible_generations) * 4.2 + 2.5],
         ),
-        yaxis=dict(
-            showgrid=False,
-            zeroline=False,
-            showticklabels=False,
-        ),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
+    st.markdown("#### Exportar cadeia visualizada")
+
+    node_export_rows = []
+    for node in sorted(final_nodes, key=lambda n: (generations.get(n, 1), n)):
+        item = meta.get(node, {})
+        node_export_rows.append(
+            {
+                "id": node,
+                "geração": generations.get(node, ""),
+                "evolução": item.get("evolucao", ""),
+                "risco": item.get("risco", ""),
+                "município": item.get("municipio", ""),
+                "tipo_contato": item.get("tipo_contato", ""),
+                "caso_origem": item.get("caso_origem", ""),
+                "data_ultimo_contato": fmt_br(item.get("data_ultimo_contato")),
+                "pós_óbito": "Sim" if item.get("pos_obito") else "Não",
+                "agrupado": "Sim" if item.get("is_group") else "Não",
+                "integrantes": ", ".join(item.get("members", [])),
+            }
+        )
+
+    edge_export_rows = []
+    for edge in final_edges:
+        edge_export_rows.append(
+            {
+                "caso_origem": edge.get("caso-origem"),
+                "contato_caso_exposto": edge.get("contato/caso exposto"),
+                "tipo_contato": edge.get("tipo de contato"),
+                "data_contato": fmt_br(edge.get("data do contato")),
+                "município": edge.get("município"),
+                "evolução": edge.get("evolução"),
+                "agrupado": "Sim" if edge.get("agrupado") else "Não",
+            }
+        )
+
+    nodes_df = pd.DataFrame(node_export_rows)
+    edges_df = pd.DataFrame(edge_export_rows)
+
+    d1, d2, d3, d4 = st.columns(4)
+    with d1:
+        st.download_button(
+            "Baixar nós CSV",
+            data=nodes_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="cadeia_transmissao_nos.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with d2:
+        st.download_button(
+            "Baixar vínculos CSV",
+            data=edges_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="cadeia_transmissao_vinculos.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with d3:
+        st.download_button(
+            "Baixar HTML interativo",
+            data=fig.to_html(include_plotlyjs="cdn").encode("utf-8"),
+            file_name="cadeia_transmissao_interativa.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+    with d4:
+        try:
+            png_bytes = fig.to_image(format="png", scale=2)
+            st.download_button(
+                "Baixar PNG",
+                data=png_bytes,
+                file_name="cadeia_transmissao.png",
+                mime="image/png",
+                use_container_width=True,
+            )
+        except Exception:
+            st.caption("Exportação PNG indisponível neste ambiente. Use o HTML interativo ou instale/atualize o pacote kaleido.")
+
     st.caption(
-        "Melhorias visuais aplicadas: distribuição por geração, rótulo curto (apenas ID), legenda por evolução, "
-        "detalhes completos no hover e destaque visual opcional para contatos pós-óbito."
+        "V16: filtros avançados, agrupamento automático, hover completo, destaque pós-óbito "
+        "e exportação da cadeia em CSV/HTML/PNG quando disponível."
     )
 
 

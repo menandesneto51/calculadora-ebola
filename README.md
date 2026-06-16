@@ -1,29 +1,21 @@
-# Calculadora Ebola — V15
+# Calculadora Ebola — V16
 
-Ferramenta em Python/Streamlit para apoio à investigação epidemiológica de janela provável de exposição, transmissibilidade, óbito, exposição pós-óbito, monitoramento de contatos e possível cadeia de transmissão.
+## Atualização V16
 
-## Atualização V15
+Esta versão adiciona filtros avançados, agrupamento automático e exportação ao mapa de possível cadeia de transmissão.
 
-Esta versão melhora a visualização do **mapa de possível cadeia de transmissão**.
+### Novidades
 
-## Melhorias visuais aplicadas
+- ocultar assintomáticos, encerrados e descartados;
+- mostrar apenas sintomáticos, suspeitos, confirmados e óbitos;
+- agrupar contatos numerosos de menor prioridade visual;
+- definir limiar de agrupamento;
+- exportar nós em CSV;
+- exportar vínculos em CSV;
+- exportar grafo em HTML interativo;
+- exportar grafo em PNG quando houver suporte pelo pacote `kaleido`.
 
-- distribuição hierárquica por geração epidemiológica;
-- melhor espaçamento vertical entre os nós;
-- rótulos curtos no gráfico (somente identificador);
-- detalhes completos apenas no hover;
-- cores por evolução;
-- formas diferentes para tipos de evolução;
-- legenda automática;
-- destaque visual opcional para contatos pós-óbito;
-- filtros por geração e por evolução;
-- opção para destacar apenas sintomáticos/suspeitos/confirmados/óbito.
-
-## Resultado esperado
-
-O grafo fica mais limpo e legível, reduzindo sobreposição de rótulos e o efeito de “leque” a partir do caso índice.
-
-## Executar localmente
+## Executar
 
 ```bat
 cd /d "C:\Users\Menandesneto\OneDrive\Área de Trabalho\calculadora Ebola"
@@ -32,11 +24,11 @@ python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-## Atualizar no GitHub
+## Subir ao GitHub
 
 ```bat
 git status
 git add app.py README.md requirements.txt
-git commit -m "Melhora visualização da cadeia de transmissão"
+git commit -m "Adiciona filtros exportação e agrupamento ao grafo"
 git push
 ```
