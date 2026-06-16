@@ -1,60 +1,34 @@
-# Calculadora Ebola — V9
+# Calculadora Ebola — V11
 
-Ferramenta em Python/Streamlit para apoio à investigação epidemiológica de janela provável de exposição, transmissibilidade, monitoramento de contatos e possível cadeia de transmissão.
+Ferramenta em Python/Streamlit para apoio à investigação epidemiológica de janela provável de exposição, transmissibilidade, óbito, exposição pós-óbito, monitoramento de contatos e possível cadeia de transmissão.
 
-## Atualização V9
+## Atualização V11
 
-Esta versão acrescenta tratamento operacional para casos que evoluíram a óbito, incluindo exposição pós-óbito.
+Esta versão revisa as informações técnicas da ferramenta para alinhamento com:
 
-A V9 diferencia:
+- Nota Técnica Conjunta nº 160/2026-DEMSP/SVSA/MS e DAHU/SAES/MS.
+- Nota Técnica da Bahia sobre vigilância epidemiológica da DVE — espécie Bundibugyo.
+- Nota Técnica de Minas Gerais sobre FHV/Ebola Bundibugyo.
+- Nota Técnica DAV nº 12/2026 do Paraná — fluxo de atendimento de casos suspeitos de Ebola.
 
-1. **Óbito como desfecho**, quando a data de início dos sintomas é conhecida.
-2. **Óbito como base retrospectiva de cálculo**, quando a data de início dos sintomas é desconhecida.
-3. **Exposição pós-óbito**, quando há manipulação do corpo, transporte, velório/funeral, sepultamento ou contato pós-óbito.
+## Principais ajustes
 
-## Regra central
+- Incubação padrão alterada para **2–21 dias**, conforme notas técnicas.
+- Janela **4–17 dias** mantida apenas como ajuste operacional local.
+- Definição de caso suspeito alinhada ao critério de 21 dias antes do início dos sintomas + febre e/ou calafrios com manifestações compatíveis.
+- Caso confirmado definido por PCR/RT-PCR ou sequenciamento em laboratório de referência.
+- Caso descartado inclui regra de segunda amostra quando a primeira coleta ocorrer antes de 72 horas do início dos sintomas.
+- Contactante/comunicante definido como assintomático com contato direto ou indireto durante período sintomático, inclusive após óbito.
+- Transmissibilidade reforçada como, em geral, após início dos sintomas; a nota do Paraná explicita que apenas pacientes sintomáticos transmitem.
+- Sangramento mantido como alerta de gravidade, não etapa obrigatória.
+- Exposição em voo incluída: mesma fileira, fileira imediatamente à frente e fileira imediatamente atrás.
+- Notificação imediata em até 24h, SINAN CID A98.4 e comunicação ao CIEVS.
+- Monitoramento diário dos contatos por 21 dias após última exposição.
+- Coleta laboratorial apenas conforme fluxo nacional e em serviço de referência na fase de mobilização.
 
-### Paciente foi a óbito com início dos sintomas conhecido
+## Observação
 
-A ferramenta usa a data de início dos sintomas como base principal. A data do óbito é registrada como desfecho e compõe a definição do fim operacional da busca de contatos, especialmente se houver exposição pós-óbito.
-
-### Paciente foi a óbito sem início dos sintomas conhecido
-
-A ferramenta pode estimar retrospectivamente o início dos sintomas a partir da data do óbito, desde que o óbito tenha ocorrido após sintomas ou que a informação sintomática seja desconhecida.
-
-### Óbito sem sintomas conhecidos
-
-A ferramenta não deve gerar uma estimativa forte apenas pela data de óbito quando não há sintomas conhecidos nem informação clínica suficiente.
-
-## Campos acrescentados
-
-- Situação/desfecho do caso.
-- Data do óbito.
-- Óbito ocorreu após sintomas?
-- Manipulação do corpo.
-- Velório/funeral.
-- Transporte do corpo.
-- Contato pós-óbito identificado.
-- Data de sepultamento seguro/fim da exposição pós-óbito.
-- Data final da exposição em vida.
-- Fim operacional da busca de contatos.
-
-## Contatos pós-óbito
-
-A lista de contatos inclui tipos de exposição como:
-
-- Manipulação do corpo.
-- Velório/funeral.
-- Sepultamento.
-- Transporte do corpo.
-- Limpeza/desinfecção.
-
-## Padrão de datas
-
-- Interface: **DD/MM/AAAA**
-- Tabelas: **DD/MM/AAAA**
-- CSVs: **DD/MM/AAAA**
-- JSON técnico: **AAAA-MM-DD**
+As definições incluídas são operacionais e servem para apoiar o uso da ferramenta. A classificação oficial deve seguir a nota técnica, guia, protocolo ou definição de caso vigente da autoridade sanitária responsável pelo evento.
 
 ## Executar localmente
 
@@ -71,10 +45,10 @@ python -m streamlit run app.py
 cd /d "C:\Users\Menandesneto\OneDrive\Área de Trabalho\calculadora Ebola"
 git status
 git add app.py README.md requirements.txt
-git commit -m "Adiciona manejo de óbito e exposição pós-óbito"
+git commit -m "Alinha definições técnicas às notas oficiais"
 git push
 ```
 
-## Observação
+## Observação final
 
-Ferramenta de apoio técnico. Não substitui definição de caso, investigação de campo, exames laboratoriais, protocolos oficiais, sistema de notificação ou comunicação imediata às autoridades sanitárias.
+Ferramenta de apoio técnico. Não substitui definição de caso oficial, investigação de campo, exames laboratoriais, protocolos oficiais, sistema de notificação ou comunicação imediata às autoridades sanitárias.

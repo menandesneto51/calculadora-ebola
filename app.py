@@ -1377,8 +1377,241 @@ def render_chain_section(contacts_df: pd.DataFrame) -> None:
         )
 
 
+
+def render_definitions_section() -> None:
+    st.subheader("6. Definições operacionais")
+
+    st.info(
+        "Estas definições são operacionais para apoiar a investigação e a organização da ferramenta. "
+        "A classificação oficial deve seguir a nota técnica, guia ou protocolo vigente da autoridade sanitária responsável pelo evento."
+    )
+
+    tab1, tab2, tab3, tab4 = st.tabs(
+        [
+            "Classificação de caso",
+            "Sintomas e gravidade",
+            "Exposição e contatos",
+            "Janelas e datas",
+        ]
+    )
+
+    with tab1:
+        st.markdown(
+            """
+            ### Caso suspeito
+
+            Pessoa com quadro clínico compatível com doença pelo vírus Ebola e vínculo epidemiológico possível, especialmente:
+
+            - febre, fadiga, fraqueza intensa, cefaleia, dor muscular/articular, dor de garganta ou perda de apetite; **e/ou**
+            - evolução para vômitos, diarreia, dor abdominal, sinais de desidratação, sinais de gravidade ou sangramento inexplicado; **e**
+            - história de exposição, viagem, permanência em área com transmissão, contato com caso suspeito/confirmado, contato com fluidos corporais, assistência em saúde, manipulação de corpo, funeral/sepultamento ou exposição laboratorial no período compatível de incubação.
+
+            **Uso na ferramenta:** classificar como suspeito quando houver combinação de sintomas e exposição compatível, ainda sem confirmação laboratorial.
+            """
+        )
+
+        st.markdown(
+            """
+            ### Caso provável
+
+            Caso suspeito com forte vínculo epidemiológico ou clínico, especialmente quando:
+
+            - houve contato direto com caso confirmado ou provável;
+            - houve exposição de alto risco a fluidos corporais, corpo, funeral/sepultamento ou ambiente contaminado;
+            - o quadro clínico é fortemente compatível, mas ainda não há confirmação laboratorial disponível.
+
+            **Uso na ferramenta:** útil para priorizar investigação, isolamento, rastreamento de contatos e resposta operacional enquanto se aguarda laboratório.
+            """
+        )
+
+        st.markdown(
+            """
+            ### Caso confirmado
+
+            Caso com confirmação laboratorial de infecção por ortoebolavírus/Ebola por método específico, como RT-PCR, teste de detecção de antígeno, isolamento viral ou outro método validado pelo laboratório de referência.
+
+            **Uso na ferramenta:** classificar como confirmado quando houver resultado laboratorial compatível validado pela rede oficial.
+            """
+        )
+
+        st.markdown(
+            """
+            ### Caso descartado
+
+            Caso inicialmente suspeito que, após investigação clínica, epidemiológica e/ou laboratorial, não atende mais à definição operacional de caso.
+
+            Situações comuns:
+
+            - resultado laboratorial negativo em amostra adequada, conforme algoritmo vigente;
+            - identificação de diagnóstico alternativo que explique o quadro;
+            - ausência de vínculo epidemiológico e inconsistência clínica após investigação;
+            - reclassificação oficial pela vigilância responsável.
+
+            **Uso na ferramenta:** manter o histórico, mas retirar da contagem ativa de suspeitos/confirmados e encerrar ou revisar contatos conforme orientação da equipe responsável.
+            """
+        )
+
+        st.warning(
+            "A definição de caso pode mudar conforme país, surto, espécie viral envolvida, capacidade laboratorial e protocolo vigente. "
+            "Use este bloco como apoio operacional, não como substituto da definição oficial do evento."
+        )
+
+    with tab2:
+        st.markdown(
+            """
+            ### Sintomas secos/iniciais
+
+            Sintomas iniciais inespecíficos, geralmente antes da fase com maior perda de fluidos:
+
+            - febre;
+            - dores musculares e articulares;
+            - cefaleia intensa;
+            - fraqueza e fadiga;
+            - dor de garganta;
+            - perda de apetite;
+            - mal-estar.
+
+            **Uso na ferramenta:** usar como marco clínico inicial quando a primeira data disponível for o começo do quadro sistêmico.
+            """
+        )
+
+        st.markdown(
+            """
+            ### Sintomas úmidos/tardios
+
+            Manifestações posteriores associadas a perda de fluidos corporais e maior gravidade clínica:
+
+            - náusea;
+            - dor abdominal;
+            - diarreia;
+            - vômitos;
+            - desidratação;
+            - piora do estado geral;
+            - sangramento inexplicado, quando presente.
+
+            **Uso na ferramenta:** se o paciente só foi detectado nesta fase e o início dos sintomas é desconhecido, o sistema pode estimar retrospectivamente o início provável dos sintomas.
+            """
+        )
+
+        st.markdown(
+            """
+            ### Alerta para sangramento/sinais de gravidade
+
+            Sangramento **não é manifestação universal** e não deve ser tratado como etapa obrigatória. Na ferramenta, este campo é apenas um alerta operacional para gravidade, incluindo:
+
+            - sangramento inexplicado;
+            - sinais de choque ou desidratação importante;
+            - piora rápida do estado geral;
+            - confusão, irritabilidade ou alteração neurológica;
+            - dispneia, dor torácica ou sinais de disfunção orgânica;
+            - necessidade de manejo intensivo, isolamento rigoroso e comunicação imediata à vigilância.
+
+            **Uso na ferramenta:** marcar como alerta para priorização assistencial, biossegurança, investigação e rastreamento de contatos.
+            """
+        )
+
+        st.markdown(
+            """
+            ### Outros sintomas possíveis
+
+            Podem ocorrer erupção cutânea, olhos vermelhos, soluços, dor torácica, falta de ar, confusão e convulsões. O quadro inicial pode ser confundido com malária, influenza, febre tifoide, meningococcemia, pneumonias, dengue, leptospirose, sepse e outras febres hemorrágicas.
+            """
+        )
+
+    with tab3:
+        st.markdown(
+            """
+            ### Exposição de risco
+
+            Situação em que a pessoa teve contato possível com fonte de infecção no período compatível:
+
+            - contato direto com sangue, secreções, vômito, fezes, urina, saliva ou outros fluidos corporais de caso suspeito/confirmado;
+            - contato com superfícies, objetos, roupas, lençóis, agulhas ou materiais contaminados;
+            - cuidado direto ao paciente sem proteção adequada;
+            - exposição ocupacional em saúde, laboratório, transporte ou limpeza/desinfecção;
+            - manipulação de corpo, velório/funeral ou sepultamento com contato;
+            - exposição a animais silvestres doentes ou mortos em área de risco.
+
+            **Uso na ferramenta:** registrar como data de última exposição ou como contato na planilha.
+            """
+        )
+
+        st.markdown(
+            """
+            ### Contato
+
+            Pessoa que teve exposição de risco a um caso suspeito, provável ou confirmado durante a janela operacional de transmissibilidade.
+
+            **Tipos úteis na planilha:**
+
+            - contato domiciliar;
+            - cuidado direto;
+            - serviço de saúde;
+            - laboratório;
+            - transporte do paciente;
+            - contato com fluidos;
+            - manipulação do corpo;
+            - velório/funeral;
+            - sepultamento;
+            - limpeza/desinfecção;
+            - comunidade/evento;
+            - outro.
+            """
+        )
+
+        st.markdown(
+            """
+            ### Exposição pós-óbito
+
+            Exposição que ocorre após a morte, principalmente durante manipulação do corpo, transporte, velório, funeral, sepultamento ou limpeza/desinfecção de ambientes e objetos.
+
+            **Uso na ferramenta:** em caso de óbito, considerar a busca de contatos até a data de sepultamento seguro ou encerramento da exposição pós-óbito.
+            """
+        )
+
+    with tab4:
+        st.markdown(
+            """
+            ### Data da última exposição
+
+            Última data conhecida ou estimada em que a pessoa teve contato de risco com fonte provável de infecção.
+
+            ### Data real/estimada de início dos sintomas
+
+            Data em que surgiram os primeiros sintomas compatíveis. Pode ser observada, estimada pela investigação ou inferida retrospectivamente pela fase clínica no momento da detecção.
+
+            ### Janela provável de exposição/infecção
+
+            Intervalo retrospectivo calculado a partir do início dos sintomas:
+
+            - início provável = início dos sintomas - incubação máxima;
+            - fim provável = início dos sintomas - incubação mínima.
+
+            ### Janela possível de início de sintomas pela última exposição
+
+            Intervalo prospectivo calculado a partir da última exposição:
+
+            - início possível = última exposição + incubação mínima;
+            - fim possível = última exposição + incubação máxima.
+
+            ### Janela operacional de transmissibilidade/busca de contatos
+
+            Intervalo operacional usado para investigação de contatos. Na ferramenta, começa no início dos sintomas e termina na maior data operacional aplicável: isolamento, fim da exposição em vida, óbito, sepultamento seguro ou encerramento da exposição pós-óbito.
+
+            ### Monitoramento de contatos
+
+            Período de acompanhamento após o último contato de risco. A ferramenta usa o parâmetro configurável de monitoramento, por padrão 21 dias.
+            """
+        )
+
+    st.markdown(
+        """
+        **Referências técnicas usadas para orientar este bloco:** CDC — sinais e sintomas da doença por Ebola; OMS — ficha técnica sobre Ebola disease, transmissão, sintomas, diagnóstico, vigilância, rastreamento de contatos e sepultamento seguro.
+        """
+    )
+
 def render_interpretation() -> None:
-    st.subheader("6. Interpretação operacional")
+    st.subheader("7. Interpretação operacional")
     st.markdown(
         """
         **1. Óbito como desfecho:** se o início dos sintomas é conhecido, a data do óbito é registrada como desfecho e não deve recalcular o início dos sintomas.
@@ -1490,6 +1723,9 @@ def main() -> None:
         st.divider()
 
         render_chain_section(contacts_df)
+        st.divider()
+
+        render_definitions_section()
         st.divider()
 
         render_interpretation()
