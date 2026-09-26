@@ -38,3 +38,25 @@ def test_assessment_generates_provenanced_windows_and_alerts():
     assert assessment.symptom_window is not None
     assert any(a.code == "SYMPTOMATIC_CONTACT" for a in assessment.alerts)
     assert any(a.code == "MONITORING_ENDS_TODAY" for a in assessment.alerts)
+
+
+def test_confirmed_case_requests_transmission_review():
+    alerts = build_investigation_alerts(
+        evolution="Confirmado",
+        today=date(2026, 9, 26),
+    )
+    assert any(a.code == "TRANSMISSION_REVIEW" and a.priority == "high" for a in alerts)
+
+def test_monitoring_tomorrow_is_low_priority():
+    alerts = build_investigation_alerts(
+        monitoring_end=date(2026, 9, 27),
+        today=date(2026, 9, 26),
+    )
+    assert any(a.code == "MONITORING_ENDS_TOMORROW" and a.priority == "low" for a in alerts)
+
+def test_missing_source_case_is_flagged():
+    alerts = build_investigation_alerts(
+        has_source_case=False,
+        today=date(2026, 9, 26),
+    )
+    assert any(a.code == "MISSING_SOURCE_CASE" for a in alerts)
