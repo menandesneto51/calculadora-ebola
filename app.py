@@ -20,6 +20,7 @@ from src.services.investigation_quality import assess_investigation_quality
 from src.domain.exposure import Exposure
 from src.services.exposure_history import effective_last_exposure
 from src.services.timeline_builder import build_contact_timeline, interval_days
+from src.services.temporal_chain import analyze_temporal_chain
 
 
 # ============================================================
@@ -1308,12 +1309,47 @@ def render_epidemiological_timeline(contacts_df: pd.DataFrame, exposures: list[E
             st.dataframe(pd.DataFrame(all_rows),use_container_width=True,hide_index=True)
 
 
+def render_temporal_chain_analysis(contacts_df: pd.DataFrame) -> None:
+    st.subheader("6. Análise temporal da cadeia — V17")
+    rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
+    links=analyze_temporal_chain(rows)
+    if not links:
+        st.info("Ainda não há vínculos entre contatos suficientes para análise temporal.")
+        return
+
+    data=pd.DataFrame([{
+        "caso-origem":x.source_id,
+        "contato/caso":x.target_id,
+        "compatibilidade":x.compatibility,
+        "geração topológica":x.generation,
+        "intervalo entre sintomas (dias)":x.serial_interval_days,
+        "fundamentação":x.rationale,
+    } for x in links])
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Vínculos",len(links))
+    c2.metric("Compatíveis",sum(x.compatibility=="compatible" for x in links))
+    c3.metric("Incompatíveis",sum(x.compatibility=="incompatible" for x in links))
+    c4.metric("Indeterminados",sum(x.compatibility=="indeterminate" for x in links))
+    st.dataframe(data,use_container_width=True,hide_index=True)
+    st.caption(
+        "Compatibilidade temporal e geração são construções analíticas. Um vínculo compatível não confirma transmissão. "
+        "O intervalo entre sintomas só é calculado quando ambas as datas estão registradas."
+    )
+    st.download_button(
+        "Baixar análise temporal da cadeia",
+        data=data.to_csv(index=False).encode("utf-8-sig"),
+        file_name="calculadora_ebola_cadeia_temporal_v17.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 def render_contacts_analysis(
     contacts_df: pd.DataFrame,
     case: CaseCalculation,
     params: CalculatorParams,
 ) -> pd.DataFrame:
-    st.subheader("6. Monitoramento de contatos")
+    st.subheader("7. Monitoramento de contatos")
 
     evaluated = evaluate_contacts(contacts_df, case, params)
 
@@ -1374,7 +1410,7 @@ def render_investigation_intelligence(
     contacts_df: pd.DataFrame,
 ) -> None:
     """Painel V17 complementar; não altera os cálculos legados da V16."""
-    st.subheader("7. Inteligência da investigação — V17")
+    st.subheader("8. Inteligência da investigação — V17")
     st.caption(
         "Camada de apoio operacional com proveniência e priorização. "
         "Não realiza diagnóstico nem substitui classificação oficial da vigilância."
@@ -1576,7 +1612,7 @@ def loaded_contacts_as_editor_df() -> pd.DataFrame | None:
 
 
 def render_investigation_quality(contacts_df: pd.DataFrame) -> None:
-    st.subheader("8. Qualidade da investigação")
+    st.subheader("9. Qualidade da investigação")
     rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
     quality=assess_investigation_quality(rows)
 
@@ -1613,7 +1649,7 @@ def render_investigation_quality(contacts_df: pd.DataFrame) -> None:
 
 def render_event_summary(contacts_df: pd.DataFrame, exposures: list[Exposure] | None = None) -> None:
     """Visão executiva agregada e snapshot do evento para CIEVS/SIS."""
-    st.subheader("9. Visão executiva do evento")
+    st.subheader("10. Visão executiva do evento")
 
     if "ebola_event_id" not in st.session_state:
         st.session_state.ebola_event_id = "EBOLA-MT-001"
@@ -2270,7 +2306,7 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
 
 
 def render_chain_section(contacts_df: pd.DataFrame) -> None:
-    st.subheader("10. Mapa de possível cadeia de transmissão")
+    st.subheader("11. Mapa de possível cadeia de transmissão")
     st.markdown(
         "O mapa usa o campo **caso-origem** para montar vínculos entre o caso índice, contatos e possíveis casos secundários. "
         "Quando um contato também se tornar suspeito, confirmado ou sintomático, ele pode ser usado como caso-origem de novos contatos."
@@ -2295,7 +2331,7 @@ def render_chain_section(contacts_df: pd.DataFrame) -> None:
 
 
 def render_definitions_section() -> None:
-    st.subheader("11. Definições operacionais")
+    st.subheader("12. Definições operacionais")
 
     st.info(
         "Estas definições são operacionais para apoiar a investigação e a organização da ferramenta. "
@@ -2641,6 +2677,9 @@ def main() -> None:
         st.divider()
 
         render_epidemiological_timeline(effective_contacts_df, exposures)
+        st.divider()
+
+        render_temporal_chain_analysis(effective_contacts_df)
         st.divider()
 
         render_contacts_analysis(effective_contacts_df, case, params)
