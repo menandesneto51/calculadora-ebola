@@ -1,0 +1,14 @@
+---
+description: Governança epidemiológica obrigatória da Calculadora Ebola
+alwaysApply: true
+---
+# Calculadora Ebola — regra de governança
+
+- Cursor é o ambiente padrão de implementação.
+- Toda regra epidemiológica deve possuir fonte, jurisdição, versão/data e classificação de evidência.
+- Diferencie sempre observed, reported, derived e estimated.
+- Hipóteses operacionais nunca devem ser apresentadas como definições oficiais.
+- Mudança de parâmetro exige teste automatizado.
+- Preserve compatibilidade com `streamlit run app.py`.
+- Não faça reescrita integral quando refatoração incremental for suficiente.
+- O Coordinator Agent deve exigir revisão dos agentes Epidemiology, Data Quality, Testing/QA, Documentation e Security/Governance nas mudanças relevantes.
