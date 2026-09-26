@@ -42,3 +42,12 @@ Para cada alteração de regra ou motor de inteligência:
 7. **Security/Governance Agent** verifica dados sensíveis, proveniência, auditoria e ausência de segredos.
 
 O Coordinator Agent somente considera uma etapa pronta para integração após registrar as verificações aplicáveis.
+
+
+## Regra de persistência e eventos
+- Toda entidade persistida deve possuir escopo de `event_id`.
+- Nunca usar CPF, nome completo ou outro identificador pessoal como chave técnica.
+- Snapshots devem ser imutáveis, versionados e verificáveis por checksum.
+- Logs de auditoria não devem conter dados pessoais desnecessários.
+- O backend local deve ser substituível por PostgreSQL/API institucional sem reescrever o domínio.
+- Migrações de esquema exigem testes e revisão Security/Governance + Data Quality.
