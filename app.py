@@ -19,6 +19,7 @@ from src.persistence.sqlite_repository import SQLiteEventRepository
 from src.services.investigation_quality import assess_investigation_quality
 from src.domain.exposure import Exposure
 from src.services.exposure_history import effective_last_exposure
+from src.services.timeline_builder import build_contact_timeline, interval_days
 
 
 # ============================================================
@@ -1245,12 +1246,74 @@ def apply_effective_exposures(contacts_df: pd.DataFrame, exposures: list[Exposur
     return result
 
 
+def render_epidemiological_timeline(contacts_df: pd.DataFrame, exposures: list[Exposure]) -> None:
+    st.subheader("5. Linha temporal epidemiológica — V17")
+    if contacts_df.empty:
+        st.info("Inclua contatos para construir linhas temporais.")
+        return
+
+    contact_ids=[clean_text(x) for x in contacts_df["identificador"].tolist() if clean_text(x)]
+    selected=st.selectbox("Contato para linha temporal",contact_ids,key="timeline_contact")
+    row=contacts_df[contacts_df["identificador"].astype(str)==selected]
+    if row.empty:
+        return
+    row=row.iloc[0]
+    last_exposure=effective_last_exposure(selected,exposures,coerce_date(row.get("data_ultimo_contato")))
+    monitoring_end=(last_exposure + timedelta(days=21)) if last_exposure else None
+    onset=coerce_date(row.get("data_inicio_sintomas"))
+    timeline=build_contact_timeline(
+        st.session_state.get("ebola_event_id","EBOLA-MT-001"),
+        selected,
+        exposures=exposures,
+        symptom_onset=onset,
+        monitoring_end=monitoring_end,
+    )
+    if not timeline:
+        st.info("Nenhum marco temporal disponível para este contato.")
+        return
+
+    timeline_df=pd.DataFrame([{
+        "data":x.event_date,
+        "marco":x.event_type,
+        "proveniência":x.provenance,
+        "fonte":x.source,
+        "observação":x.notes,
+    } for x in timeline])
+    st.dataframe(timeline_df,use_container_width=True,hide_index=True)
+
+    if last_exposure and onset:
+        delta=interval_days(last_exposure,onset)
+        st.metric("Intervalo exposição final → sintomas",f"{delta} dia(s)")
+        st.caption(
+            "Intervalo temporal observado entre datas registradas. Não demonstra, isoladamente, "
+            "que a exposição selecionada causou a infecção."
+        )
+
+    all_rows=[]
+    for _,contact in contacts_df.iterrows():
+        cid=clean_text(contact.get("identificador"))
+        legacy=coerce_date(contact.get("data_ultimo_contato"))
+        effective=effective_last_exposure(cid,exposures,legacy)
+        onset_date=coerce_date(contact.get("data_inicio_sintomas"))
+        if effective:
+            all_rows.append({
+                "contato":cid,
+                "última exposição efetiva":effective,
+                "início sintomas":onset_date,
+                "intervalo dias":interval_days(effective,onset_date),
+                "origem última exposição":"histórico estruturado" if any(x.contact_id==cid for x in exposures) else "campo legado",
+            })
+    if all_rows:
+        with st.expander("Resumo temporal do evento",expanded=False):
+            st.dataframe(pd.DataFrame(all_rows),use_container_width=True,hide_index=True)
+
+
 def render_contacts_analysis(
     contacts_df: pd.DataFrame,
     case: CaseCalculation,
     params: CalculatorParams,
 ) -> pd.DataFrame:
-    st.subheader("5. Monitoramento de contatos")
+    st.subheader("6. Monitoramento de contatos")
 
     evaluated = evaluate_contacts(contacts_df, case, params)
 
@@ -1311,7 +1374,7 @@ def render_investigation_intelligence(
     contacts_df: pd.DataFrame,
 ) -> None:
     """Painel V17 complementar; não altera os cálculos legados da V16."""
-    st.subheader("6. Inteligência da investigação — V17")
+    st.subheader("7. Inteligência da investigação — V17")
     st.caption(
         "Camada de apoio operacional com proveniência e priorização. "
         "Não realiza diagnóstico nem substitui classificação oficial da vigilância."
@@ -1513,7 +1576,7 @@ def loaded_contacts_as_editor_df() -> pd.DataFrame | None:
 
 
 def render_investigation_quality(contacts_df: pd.DataFrame) -> None:
-    st.subheader("7. Qualidade da investigação")
+    st.subheader("8. Qualidade da investigação")
     rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
     quality=assess_investigation_quality(rows)
 
@@ -1550,7 +1613,7 @@ def render_investigation_quality(contacts_df: pd.DataFrame) -> None:
 
 def render_event_summary(contacts_df: pd.DataFrame, exposures: list[Exposure] | None = None) -> None:
     """Visão executiva agregada e snapshot do evento para CIEVS/SIS."""
-    st.subheader("8. Visão executiva do evento")
+    st.subheader("9. Visão executiva do evento")
 
     if "ebola_event_id" not in st.session_state:
         st.session_state.ebola_event_id = "EBOLA-MT-001"
@@ -2207,7 +2270,7 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
 
 
 def render_chain_section(contacts_df: pd.DataFrame) -> None:
-    st.subheader("9. Mapa de possível cadeia de transmissão")
+    st.subheader("10. Mapa de possível cadeia de transmissão")
     st.markdown(
         "O mapa usa o campo **caso-origem** para montar vínculos entre o caso índice, contatos e possíveis casos secundários. "
         "Quando um contato também se tornar suspeito, confirmado ou sintomático, ele pode ser usado como caso-origem de novos contatos."
@@ -2232,7 +2295,7 @@ def render_chain_section(contacts_df: pd.DataFrame) -> None:
 
 
 def render_definitions_section() -> None:
-    st.subheader("10. Definições operacionais")
+    st.subheader("11. Definições operacionais")
 
     st.info(
         "Estas definições são operacionais para apoiar a investigação e a organização da ferramenta. "
@@ -2575,6 +2638,9 @@ def main() -> None:
 
         exposures = render_exposure_editor(contacts_df)
         effective_contacts_df = apply_effective_exposures(contacts_df, exposures)
+        st.divider()
+
+        render_epidemiological_timeline(effective_contacts_df, exposures)
         st.divider()
 
         render_contacts_analysis(effective_contacts_df, case, params)
