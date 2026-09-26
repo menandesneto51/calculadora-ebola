@@ -1127,6 +1127,11 @@ def render_contact_editor() -> pd.DataFrame:
         st.error(f"Não foi possível ler o arquivo importado: {exc}")
         default_df = default_contacts_df()
 
+    loaded_df = loaded_contacts_as_editor_df()
+    if uploaded is None and loaded_df is not None:
+        default_df = loaded_df
+        st.caption(f"Contatos recuperados do evento {st.session_state.get('ebola_loaded_event_id', '')}.")
+
     contacts_df = st.data_editor(
         default_df,
         num_rows="dynamic",
@@ -1361,6 +1366,67 @@ def render_investigation_intelligence(
         st.success("Nenhum alerta operacional V17 identificado nos contatos carregados.")
 
 
+def render_event_manager() -> pd.DataFrame | None:
+    """Gerencia eventos locais sem persistência implícita."""
+    st.sidebar.divider()
+    st.sidebar.header("Investigações locais")
+    repository = SQLiteEventRepository("data/calculadora_ebola.db")
+    try:
+        repository.migrate()
+        events = repository.list_events()
+    except Exception as exc:
+        st.sidebar.warning(f"SQLite local indisponível: {exc}")
+        return None
+
+    if not events:
+        st.sidebar.caption("Nenhuma investigação persistida localmente.")
+        return None
+
+    labels = ["— nova investigação —"] + [
+        f"{e['event_id']} · {e['name']} · {e['status']}" for e in events
+    ]
+    selected = st.sidebar.selectbox("Abrir investigação", labels, index=0)
+    if selected == "— nova investigação —":
+        return None
+
+    event_id = selected.split(" · ", 1)[0]
+    if st.sidebar.button("Carregar evento selecionado", use_container_width=True):
+        event = repository.get_event(event_id)
+        if event:
+            st.session_state.ebola_event_id = event["event_id"]
+            st.session_state.ebola_event_name = event["name"]
+            st.session_state.ebola_event_municipality = event.get("municipality") or ""
+            st.session_state.ebola_event_status = event.get("status") or "monitoring"
+            st.session_state.ebola_snapshot_version = repository.next_snapshot_version(event_id)
+            st.session_state.ebola_loaded_contacts = repository.load_contacts(event_id)
+            st.session_state.ebola_loaded_event_id = event_id
+            st.rerun()
+    return None
+
+
+def loaded_contacts_as_editor_df() -> pd.DataFrame | None:
+    rows = st.session_state.get("ebola_loaded_contacts")
+    if not rows:
+        return None
+    mapped = []
+    for x in rows:
+        mapped.append({
+            "identificador": x.get("contact_id"),
+            "nome_codigo": "",
+            "caso_origem": x.get("source_case_id"),
+            "data_ultimo_contato": coerce_date(x.get("exposure_date")),
+            "tipo_contato": x.get("exposure_type"),
+            "municipio": x.get("municipality"),
+            "risco": x.get("risk"),
+            "evolucao": x.get("evolution"),
+            "data_inicio_sintomas": coerce_date(x.get("symptom_onset_date")),
+            "data_fim_transmissibilidade": coerce_date(x.get("transmission_end_date")),
+            "data_ultima_avaliacao": coerce_date(x.get("last_assessment_date")),
+            "observacao": x.get("observation"),
+        })
+    return normalize_contacts_df(pd.DataFrame(mapped))
+
+
 def render_event_summary(contacts_df: pd.DataFrame) -> None:
     """Visão executiva agregada e snapshot do evento para CIEVS/SIS."""
     st.subheader("6. Visão executiva do evento")
@@ -1373,6 +1439,8 @@ def render_event_summary(contacts_df: pd.DataFrame) -> None:
         st.session_state.ebola_event_municipality = ""
     if "ebola_snapshot_version" not in st.session_state:
         st.session_state.ebola_snapshot_version = 1
+    if "ebola_event_status" not in st.session_state:
+        st.session_state.ebola_event_status = "monitoring"
 
     with st.expander("Identificação do evento", expanded=False):
         event_id = st.text_input(
@@ -1386,11 +1454,18 @@ def render_event_summary(contacts_df: pd.DataFrame) -> None:
             key="ebola_event_municipality",
             help="Campo operacional; não altera os cálculos epidemiológicos.",
         )
+        event_status = st.selectbox(
+            "Status operacional",
+            options=["monitoring", "active", "controlled", "closed"],
+            key="ebola_event_status",
+            help="A alteração só é persistida quando o botão de salvar for acionado.",
+        )
 
     event = OutbreakEvent(
         event_id=event_id.strip(),
         name=event_name.strip(),
         jurisdiction="Mato Grosso",
+        status=event_status,
         municipality=municipality.strip() or None,
         state="MT",
     )
@@ -1460,6 +1535,24 @@ def render_event_summary(contacts_df: pd.DataFrame) -> None:
         "DEV local: os dados somente são gravados quando você aciona o botão abaixo. "
         "O arquivo SQLite permanece em data/ e está excluído do Git."
     )
+    try:
+        repository = SQLiteEventRepository("data/calculadora_ebola.db")
+        repository.migrate()
+        audit_rows = repository.audit_for_event(event.event_id)
+        snapshot_rows = repository.list_snapshots(event.event_id)
+        if audit_rows or snapshot_rows:
+            with st.expander("Histórico local do evento", expanded=False):
+                if snapshot_rows:
+                    st.markdown("**Snapshots persistidos**")
+                    st.dataframe(pd.DataFrame(snapshot_rows), use_container_width=True, hide_index=True)
+                if audit_rows:
+                    st.markdown("**Trilha de auditoria**")
+                    audit_display = pd.DataFrame(audit_rows)
+                    safe_cols = [x for x in ["action","entity_type","entity_id","actor","occurred_at"] if x in audit_display.columns]
+                    st.dataframe(audit_display[safe_cols], use_container_width=True, hide_index=True)
+    except Exception:
+        pass
+
     if st.button("Salvar evento e contatos no SQLite local", use_container_width=True):
         try:
             repository = SQLiteEventRepository("data/calculadora_ebola.db")
@@ -2306,6 +2399,7 @@ def render_interpretation() -> None:
 def main() -> None:
     configure_page()
     params = sidebar_params()
+    render_event_manager()
 
     (
         last_exposure_date,
