@@ -14,6 +14,7 @@ from src.services.investigation import assess_investigation
 from src.services.prioritization import calculate_operational_priority
 from src.domain.outbreak import OutbreakEvent
 from src.services.outbreak_summary import summarize_outbreak
+from src.services.event_registry import build_event_snapshot, snapshot_to_json
 
 
 # ============================================================
@@ -1360,14 +1361,44 @@ def render_investigation_intelligence(
 
 
 def render_event_summary(contacts_df: pd.DataFrame) -> None:
-    """Visão executiva agregada do evento para CIEVS/SIS."""
+    """Visão executiva agregada e snapshot do evento para CIEVS/SIS."""
     st.subheader("6. Visão executiva do evento")
+
+    if "ebola_event_id" not in st.session_state:
+        st.session_state.ebola_event_id = "EBOLA-MT-001"
+    if "ebola_event_name" not in st.session_state:
+        st.session_state.ebola_event_name = "Investigação Ebola"
+    if "ebola_event_municipality" not in st.session_state:
+        st.session_state.ebola_event_municipality = ""
+    if "ebola_snapshot_version" not in st.session_state:
+        st.session_state.ebola_snapshot_version = 1
+
+    with st.expander("Identificação do evento", expanded=False):
+        event_id = st.text_input(
+            "ID do evento",
+            key="ebola_event_id",
+            help="Use um identificador institucional estável e sem dados pessoais.",
+        )
+        event_name = st.text_input("Nome operacional do evento", key="ebola_event_name")
+        municipality = st.text_input(
+            "Município/local de referência",
+            key="ebola_event_municipality",
+            help="Campo operacional; não altera os cálculos epidemiológicos.",
+        )
+
     event = OutbreakEvent(
-        event_id="EBOLA-LOCAL",
-        name="Investigação Ebola",
+        event_id=event_id.strip(),
+        name=event_name.strip(),
         jurisdiction="Mato Grosso",
+        municipality=municipality.strip() or None,
         state="MT",
     )
+    try:
+        event.validate()
+    except ValueError as exc:
+        st.error(f"Evento inválido: {exc}")
+        return
+
     summary = summarize_outbreak(event, contacts_df)
 
     c1, c2, c3, c4 = st.columns(4)
@@ -1386,6 +1417,42 @@ def render_event_summary(contacts_df: pd.DataFrame) -> None:
         f"Evento {event.event_id} · jurisdição {event.jurisdiction} · "
         f"protocolo {event.protocol_version}. Resumo agregado para apoio operacional."
     )
+
+    snapshot_payload = {
+        "summary": {
+            "total_contacts": summary.total_contacts,
+            "active_monitoring": summary.active_monitoring,
+            "symptomatic_or_suspected": summary.symptomatic_or_suspected,
+            "confirmed": summary.confirmed,
+            "deaths": summary.deaths,
+            "closed_or_discarded": summary.closed_or_discarded,
+            "missing_source_case": summary.missing_source_case,
+            "post_mortem_exposures": summary.post_mortem_exposures,
+        },
+        "contacts": contacts_df.where(pd.notna(contacts_df), None).to_dict(orient="records"),
+    }
+    snapshot = build_event_snapshot(
+        event,
+        snapshot_payload,
+        snapshot_version=int(st.session_state.ebola_snapshot_version),
+    )
+    snapshot_json = snapshot_to_json(snapshot)
+
+    st.markdown("#### Snapshot auditável")
+    s1, s2, s3 = st.columns([1, 1, 2])
+    s1.metric("Versão", snapshot.snapshot_version)
+    s2.metric("Protocolo", snapshot.protocol_version)
+    s3.code(snapshot.checksum_sha256, language=None)
+    st.download_button(
+        "Baixar snapshot JSON do evento",
+        data=snapshot_json.encode("utf-8"),
+        file_name=f"{event.event_id}_snapshot_v{snapshot.snapshot_version}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    if st.button("Preparar próxima versão do snapshot", use_container_width=True):
+        st.session_state.ebola_snapshot_version += 1
+        st.rerun()
 
 
 def render_chain_graph(contacts_df: pd.DataFrame) -> None:
