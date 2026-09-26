@@ -9,7 +9,7 @@ from src.domain.audit import AuditEntry
 from src.domain.outbreak import OutbreakEvent
 from src.domain.exposure import Exposure
 from src.services.event_registry import EventSnapshot
-from .schema import MIGRATIONS
+from .schema import MIGRATIONS, SCHEMA_VERSION
 
 class SQLiteEventRepository:
     def __init__(self, db_path: str | Path) -> None:
@@ -26,6 +26,13 @@ class SQLiteEventRepository:
         with self.connect() as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL)")
             applied = {row[0] for row in conn.execute("SELECT version FROM schema_version")}
+            if applied and max(applied) > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Banco usa schema {max(applied)}, superior ao suportado pela aplicação ({SCHEMA_VERSION})."
+                )
+            expected=set(range(1,SCHEMA_VERSION+1))
+            if set(MIGRATIONS) != expected:
+                raise RuntimeError("MIGRATIONS deve conter sequência contínua até SCHEMA_VERSION.")
             for version in sorted(MIGRATIONS):
                 if version not in applied:
                     conn.executescript(MIGRATIONS[version])
