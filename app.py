@@ -11,6 +11,9 @@ import streamlit as st
 
 from src.epidemiology.parameters import EpidemiologyParameters
 from src.services.investigation import assess_investigation
+from src.services.prioritization import calculate_operational_priority
+from src.domain.outbreak import OutbreakEvent
+from src.services.outbreak_summary import summarize_outbreak
 
 
 # ============================================================
@@ -1260,12 +1263,30 @@ def render_investigation_intelligence(
     critical = sum(a.priority == "critical" for a in case_assessment.alerts)
     high = sum(a.priority == "high" for a in case_assessment.alerts)
     inconsistencies = len(case_assessment.validation_issues)
+    case_priority = calculate_operational_priority(
+        case_assessment.alerts,
+        validation_issue_count=inconsistencies,
+    )
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Alertas do caso", total_alerts)
     m2.metric("Críticos", critical)
     m3.metric("Alta prioridade", high)
     m4.metric("Inconsistências", inconsistencies)
+
+    st.markdown("#### Prioridade operacional explicável")
+    st.progress(case_priority.score / 100)
+    st.write(f"**Índice operacional:** {case_priority.score}/100 — {case_priority.interpretation}")
+    st.caption(
+        "Este índice serve exclusivamente para ordenar pendências de investigação. "
+        "Não representa probabilidade de doença, gravidade clínica ou classificação oficial."
+    )
+    if case_priority.factors:
+        factor_df = pd.DataFrame([
+            {"fator": f.code, "pontos": f.points, "justificativa": f.rationale}
+            for f in case_priority.factors
+        ])
+        st.dataframe(factor_df, use_container_width=True, hide_index=True)
 
     if case_assessment.monitoring_end is not None:
         st.caption(
@@ -1305,9 +1326,15 @@ def render_investigation_intelligence(
             has_source_case=bool(clean_text(row.get("caso_origem"))),
             params=EpidemiologyParameters(),
         )
+        operational_priority = calculate_operational_priority(
+            assessment.alerts,
+            validation_issue_count=len(assessment.validation_issues),
+        )
         for alert in assessment.alerts:
             contact_rows.append({
                 "identificador": clean_text(row.get("identificador")),
+                "índice operacional": operational_priority.score,
+                "nível operacional": operational_priority.level,
                 "prioridade": alert.priority,
                 "código": alert.code,
                 "alerta": alert.title,
@@ -1330,6 +1357,35 @@ def render_investigation_intelligence(
         )
     else:
         st.success("Nenhum alerta operacional V17 identificado nos contatos carregados.")
+
+
+def render_event_summary(contacts_df: pd.DataFrame) -> None:
+    """Visão executiva agregada do evento para CIEVS/SIS."""
+    st.subheader("6. Visão executiva do evento")
+    event = OutbreakEvent(
+        event_id="EBOLA-LOCAL",
+        name="Investigação Ebola",
+        jurisdiction="Mato Grosso",
+        state="MT",
+    )
+    summary = summarize_outbreak(event, contacts_df)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Contatos", summary.total_contacts)
+    c2.metric("Em monitoramento", summary.active_monitoring)
+    c3.metric("Sintomáticos/suspeitos", summary.symptomatic_or_suspected)
+    c4.metric("Confirmados", summary.confirmed)
+
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Óbitos", summary.deaths)
+    c6.metric("Encerrados/descartados", summary.closed_or_discarded)
+    c7.metric("Sem caso-origem", summary.missing_source_case)
+    c8.metric("Exposições pós-morte", summary.post_mortem_exposures)
+
+    st.caption(
+        f"Evento {event.event_id} · jurisdição {event.jurisdiction} · "
+        f"protocolo {event.protocol_version}. Resumo agregado para apoio operacional."
+    )
 
 
 def render_chain_graph(contacts_df: pd.DataFrame) -> None:
@@ -1838,7 +1894,7 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
 
 
 def render_chain_section(contacts_df: pd.DataFrame) -> None:
-    st.subheader("6. Mapa de possível cadeia de transmissão")
+    st.subheader("7. Mapa de possível cadeia de transmissão")
     st.markdown(
         "O mapa usa o campo **caso-origem** para montar vínculos entre o caso índice, contatos e possíveis casos secundários. "
         "Quando um contato também se tornar suspeito, confirmado ou sintomático, ele pode ser usado como caso-origem de novos contatos."
@@ -1863,7 +1919,7 @@ def render_chain_section(contacts_df: pd.DataFrame) -> None:
 
 
 def render_definitions_section() -> None:
-    st.subheader("7. Definições operacionais")
+    st.subheader("8. Definições operacionais")
 
     st.info(
         "Estas definições são operacionais para apoiar a investigação e a organização da ferramenta. "
@@ -2207,6 +2263,9 @@ def main() -> None:
         st.divider()
 
         render_investigation_intelligence(case, contacts_df)
+        st.divider()
+
+        render_event_summary(contacts_df)
         st.divider()
 
         render_chain_section(contacts_df)
