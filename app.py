@@ -2700,7 +2700,10 @@ def main() -> None:
         effective_contacts_df = apply_effective_exposures(contacts_df, exposures)
         st.divider()
 
-        render_command_center(effective_contacts_df, exposures)\n        st.divider()\n\n        render_epidemiological_timeline(effective_contacts_df, exposures)
+        render_command_center(effective_contacts_df, exposures)
+        st.divider()
+
+        render_epidemiological_timeline(effective_contacts_df, exposures)
         st.divider()
 
         render_temporal_chain_analysis(effective_contacts_df)
