@@ -21,6 +21,7 @@ from src.domain.exposure import Exposure
 from src.services.exposure_history import effective_last_exposure
 from src.services.timeline_builder import build_contact_timeline, interval_days
 from src.services.temporal_chain import analyze_temporal_chain
+from src.services.command_center import build_command_center
 
 
 # ============================================================
@@ -1247,8 +1248,31 @@ def apply_effective_exposures(contacts_df: pd.DataFrame, exposures: list[Exposur
     return result
 
 
+def render_command_center(contacts_df: pd.DataFrame, exposures: list[Exposure]) -> None:
+    st.subheader("5. Investigation Command Center — V17")
+    rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
+    summary=build_command_center(rows,exposures,date.today())
+    a,b,c,d=st.columns(4)
+    a.metric("Contatos",summary.contacts); b.metric("Exposições",summary.exposures)
+    c.metric("Qualidade",f"{summary.quality_score}/100"); d.metric("Pendências",summary.quality_issues)
+    e,f,g,h=st.columns(4)
+    e.metric("Sintomáticos/suspeitos",summary.symptomatic_or_suspected); f.metric("Confirmados",summary.confirmed)
+    g.metric("Óbitos",summary.deaths); h.metric("Monitoramentos vencidos",summary.monitoring_overdue)
+    i,j,k,l=st.columns(4)
+    i.metric("Vínculos temporais",summary.temporal_links); j.metric("Incompatíveis",summary.incompatible_links)
+    k.metric("Indeterminados",summary.indeterminate_links); l.metric("Encerram hoje",summary.monitoring_due)
+    attention=[]
+    if summary.monitoring_overdue: attention.append(f"{summary.monitoring_overdue} monitoramento(s) vencido(s)")
+    if summary.incompatible_links: attention.append(f"{summary.incompatible_links} vínculo(s) temporalmente incompatível(is)")
+    if summary.quality_issues: attention.append(f"{summary.quality_issues} pendência(s) de qualidade")
+    if summary.symptomatic_or_suspected: attention.append(f"{summary.symptomatic_or_suspected} contato(s) sintomático(s)/suspeito(s)")
+    if attention: st.warning("Revisão operacional prioritária:\n\n- "+"\n- ".join(attention))
+    else: st.success("Nenhuma pendência agregada identificada pelos motores V17.")
+    st.caption("Visão executiva derivada dos módulos V17; não substitui classificação, avaliação clínica ou decisão sanitária.")
+
+
 def render_epidemiological_timeline(contacts_df: pd.DataFrame, exposures: list[Exposure]) -> None:
-    st.subheader("5. Linha temporal epidemiológica — V17")
+    st.subheader("6. Linha temporal epidemiológica — V17")
     if contacts_df.empty:
         st.info("Inclua contatos para construir linhas temporais.")
         return
@@ -1310,7 +1334,7 @@ def render_epidemiological_timeline(contacts_df: pd.DataFrame, exposures: list[E
 
 
 def render_temporal_chain_analysis(contacts_df: pd.DataFrame) -> None:
-    st.subheader("6. Análise temporal da cadeia — V17")
+    st.subheader("7. Análise temporal da cadeia — V17")
     rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
     links=analyze_temporal_chain(rows)
     if not links:
@@ -1349,7 +1373,7 @@ def render_contacts_analysis(
     case: CaseCalculation,
     params: CalculatorParams,
 ) -> pd.DataFrame:
-    st.subheader("7. Monitoramento de contatos")
+    st.subheader("8. Monitoramento de contatos")
 
     evaluated = evaluate_contacts(contacts_df, case, params)
 
@@ -1410,7 +1434,7 @@ def render_investigation_intelligence(
     contacts_df: pd.DataFrame,
 ) -> None:
     """Painel V17 complementar; não altera os cálculos legados da V16."""
-    st.subheader("8. Inteligência da investigação — V17")
+    st.subheader("9. Inteligência da investigação — V17")
     st.caption(
         "Camada de apoio operacional com proveniência e priorização. "
         "Não realiza diagnóstico nem substitui classificação oficial da vigilância."
@@ -1612,7 +1636,7 @@ def loaded_contacts_as_editor_df() -> pd.DataFrame | None:
 
 
 def render_investigation_quality(contacts_df: pd.DataFrame) -> None:
-    st.subheader("9. Qualidade da investigação")
+    st.subheader("10. Qualidade da investigação")
     rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
     quality=assess_investigation_quality(rows)
 
@@ -1649,7 +1673,7 @@ def render_investigation_quality(contacts_df: pd.DataFrame) -> None:
 
 def render_event_summary(contacts_df: pd.DataFrame, exposures: list[Exposure] | None = None) -> None:
     """Visão executiva agregada e snapshot do evento para CIEVS/SIS."""
-    st.subheader("10. Visão executiva do evento")
+    st.subheader("11. Visão executiva do evento")
 
     if "ebola_event_id" not in st.session_state:
         st.session_state.ebola_event_id = "EBOLA-MT-001"
@@ -2306,7 +2330,7 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
 
 
 def render_chain_section(contacts_df: pd.DataFrame) -> None:
-    st.subheader("11. Mapa de possível cadeia de transmissão")
+    st.subheader("12. Mapa de possível cadeia de transmissão")
     st.markdown(
         "O mapa usa o campo **caso-origem** para montar vínculos entre o caso índice, contatos e possíveis casos secundários. "
         "Quando um contato também se tornar suspeito, confirmado ou sintomático, ele pode ser usado como caso-origem de novos contatos."
@@ -2331,7 +2355,7 @@ def render_chain_section(contacts_df: pd.DataFrame) -> None:
 
 
 def render_definitions_section() -> None:
-    st.subheader("12. Definições operacionais")
+    st.subheader("13. Definições operacionais")
 
     st.info(
         "Estas definições são operacionais para apoiar a investigação e a organização da ferramenta. "
@@ -2676,7 +2700,7 @@ def main() -> None:
         effective_contacts_df = apply_effective_exposures(contacts_df, exposures)
         st.divider()
 
-        render_epidemiological_timeline(effective_contacts_df, exposures)
+        render_command_center(effective_contacts_df, exposures)\n        st.divider()\n\n        render_epidemiological_timeline(effective_contacts_df, exposures)
         st.divider()
 
         render_temporal_chain_analysis(effective_contacts_df)
