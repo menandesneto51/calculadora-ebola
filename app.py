@@ -9,6 +9,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from src.epidemiology.parameters import EpidemiologyParameters
+from src.services.investigation import assess_investigation
+
 
 # ============================================================
 # Modelos, parâmetros e opções
@@ -16,8 +19,8 @@ import streamlit as st
 
 @dataclass(frozen=True)
 class CalculatorParams:
-    min_incubation_days: int = 4
-    max_incubation_days: int = 17
+    min_incubation_days: int = 2
+    max_incubation_days: int = 21
     wet_symptom_offset_days: int = 4
     severe_alert_offset_days: int = 5
     death_offset_days: int = 10
@@ -850,19 +853,20 @@ def sidebar_params() -> CalculatorParams:
     with st.sidebar:
         st.header("Parâmetros editáveis")
 
-        use_classic = st.toggle(
-            "Usar incubação clássica 2–21 dias",
+        use_legacy_incubation = st.toggle(
+            "Usar configuração legada de incubação",
             value=False,
-            help="Guias técnicos costumam citar 2–21 dias. O padrão operacional 4–17 dias permanece ajustável.",
+            help="A V17 utiliza 2–21 dias como padrão epidemiológico. Ative somente para reproduzir cálculos históricos da V16.",
         )
 
-        if use_classic:
-            min_inc = 2
-            max_inc = 21
-            st.info("Incubação configurada como 2–21 dias.")
-        else:
+        if use_legacy_incubation:
             min_inc = st.number_input("Incubação mínima, em dias", min_value=1, max_value=60, value=4)
             max_inc = st.number_input("Incubação máxima, em dias", min_value=1, max_value=60, value=17)
+            st.warning("Modo legado ativo. Os resultados devem ser interpretados como reprodução de configuração histórica.")
+        else:
+            min_inc = 2
+            max_inc = 21
+            st.info("Protocolo V17: incubação configurada como 2–21 dias.")
 
         wet_offset = st.number_input(
             "Dias após início dos sintomas para alerta de sintomas úmidos/tardios",
@@ -1216,6 +1220,116 @@ def render_contacts_analysis(
     return evaluated
 
 
+
+
+def render_investigation_intelligence(
+    case: CaseCalculation,
+    contacts_df: pd.DataFrame,
+) -> None:
+    """Painel V17 complementar; não altera os cálculos legados da V16."""
+    st.subheader("5. Inteligência da investigação — V17")
+    st.caption(
+        "Camada de apoio operacional com proveniência e priorização. "
+        "Não realiza diagnóstico nem substitui classificação oficial da vigilância."
+    )
+
+    post_mortem = any(
+        value == "Sim"
+        for value in [
+            case.body_manipulation,
+            case.funeral_or_wake,
+            case.body_transport,
+            case.post_mortem_contact,
+        ]
+    )
+
+    case_assessment = assess_investigation(
+        last_exposure=case.last_exposure_date,
+        symptom_onset=case.symptom_onset_date,
+        detection_date=case.detection_date,
+        death_date=case.death_date,
+        evolution="Óbito" if case.case_status == "Óbito" else None,
+        symptomatic=True,
+        post_mortem_exposure=post_mortem,
+        has_outcome=case.case_status != "Ignorado",
+        has_source_case=True,
+        params=EpidemiologyParameters(),
+    )
+
+    total_alerts = len(case_assessment.alerts)
+    critical = sum(a.priority == "critical" for a in case_assessment.alerts)
+    high = sum(a.priority == "high" for a in case_assessment.alerts)
+    inconsistencies = len(case_assessment.validation_issues)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Alertas do caso", total_alerts)
+    m2.metric("Críticos", critical)
+    m3.metric("Alta prioridade", high)
+    m4.metric("Inconsistências", inconsistencies)
+
+    if case_assessment.monitoring_end is not None:
+        st.caption(
+            f"Protocolo {case_assessment.monitoring_end.protocol_version} · "
+            f"fonte do resultado: {case_assessment.monitoring_end.source_type} · "
+            f"método: {case_assessment.monitoring_end.calculation_method}"
+        )
+
+    for issue in case_assessment.validation_issues:
+        st.warning(f"[{issue.code}] {issue.description} — {issue.recommended_action}")
+
+    for alert in case_assessment.alerts:
+        message = f"**{alert.title}** — {alert.rationale}  \nAção sugerida: {alert.recommended_action}"
+        if alert.priority == "critical":
+            st.error(message)
+        elif alert.priority == "high":
+            st.warning(message)
+        else:
+            st.info(message)
+
+    if contacts_df.empty:
+        st.info("Inclua contatos para gerar inteligência individual de seguimento.")
+        return
+
+    contact_rows = []
+    post_mortem_types = {"Manipulação do corpo", "Velório/funeral", "Sepultamento", "Limpeza/desinfecção"}
+    for _, row in contacts_df.iterrows():
+        last_contact = coerce_date(row.get("data_ultimo_contato"))
+        evolution = clean_text(row.get("evolucao"))
+        assessment = assess_investigation(
+            last_exposure=last_contact,
+            symptom_onset=coerce_date(row.get("data_inicio_sintomas")),
+            evolution=evolution,
+            symptomatic=evolution in {"Sintomático", "Suspeito", "Confirmado"},
+            post_mortem_exposure=clean_text(row.get("tipo_contato")) in post_mortem_types,
+            has_outcome=evolution not in {"", "Em monitoramento"},
+            has_source_case=bool(clean_text(row.get("caso_origem"))),
+            params=EpidemiologyParameters(),
+        )
+        for alert in assessment.alerts:
+            contact_rows.append({
+                "identificador": clean_text(row.get("identificador")),
+                "prioridade": alert.priority,
+                "código": alert.code,
+                "alerta": alert.title,
+                "ação sugerida": alert.recommended_action,
+            })
+
+    if contact_rows:
+        intelligence_df = pd.DataFrame(contact_rows)
+        priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        intelligence_df["_ordem"] = intelligence_df["prioridade"].map(priority_order).fillna(9)
+        intelligence_df = intelligence_df.sort_values(["_ordem", "identificador"]).drop(columns=["_ordem"])
+        st.markdown("#### Fila operacional priorizada")
+        st.dataframe(intelligence_df, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Baixar fila de inteligência em CSV",
+            data=intelligence_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="calculadora_ebola_inteligencia_v17.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    else:
+        st.success("Nenhum alerta operacional V17 identificado nos contatos carregados.")
 
 
 def render_chain_graph(contacts_df: pd.DataFrame) -> None:
@@ -1724,7 +1838,7 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
 
 
 def render_chain_section(contacts_df: pd.DataFrame) -> None:
-    st.subheader("5. Mapa de possível cadeia de transmissão")
+    st.subheader("6. Mapa de possível cadeia de transmissão")
     st.markdown(
         "O mapa usa o campo **caso-origem** para montar vínculos entre o caso índice, contatos e possíveis casos secundários. "
         "Quando um contato também se tornar suspeito, confirmado ou sintomático, ele pode ser usado como caso-origem de novos contatos."
@@ -1749,7 +1863,7 @@ def render_chain_section(contacts_df: pd.DataFrame) -> None:
 
 
 def render_definitions_section() -> None:
-    st.subheader("6. Definições operacionais")
+    st.subheader("7. Definições operacionais")
 
     st.info(
         "Estas definições são operacionais para apoiar a investigação e a organização da ferramenta. "
@@ -2090,6 +2204,9 @@ def main() -> None:
         st.divider()
 
         render_contacts_analysis(contacts_df, case, params)
+        st.divider()
+
+        render_investigation_intelligence(case, contacts_df)
         st.divider()
 
         render_chain_section(contacts_df)
