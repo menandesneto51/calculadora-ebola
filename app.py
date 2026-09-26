@@ -1456,7 +1456,7 @@ def render_investigation_intelligence(
         detection_date=case.detection_date,
         death_date=case.death_date,
         evolution="Óbito" if case.case_status == "Óbito" else None,
-        symptomatic=True,
+        symptomatic=False,
         post_mortem_exposure=post_mortem,
         has_outcome=case.case_status != "Ignorado",
         has_source_case=True,
