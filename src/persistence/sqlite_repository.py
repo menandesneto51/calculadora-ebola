@@ -83,6 +83,18 @@ class SQLiteEventRepository:
         with self.connect() as conn:
             return [dict(r) for r in conn.execute("SELECT * FROM audit_log WHERE event_id=? ORDER BY occurred_at DESC,id DESC",(event_id,))]
 
+    def list_snapshots(self,event_id:str) -> list[dict[str,Any]]:
+        with self.connect() as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT event_id,snapshot_version,protocol_version,generated_at,checksum_sha256 "
+                "FROM snapshots WHERE event_id=? ORDER BY snapshot_version DESC",(event_id,)
+            )]
+
+    def next_snapshot_version(self,event_id:str) -> int:
+        with self.connect() as conn:
+            row=conn.execute("SELECT MAX(snapshot_version) AS v FROM snapshots WHERE event_id=?",(event_id,)).fetchone()
+            return int(row["v"] or 0)+1
+
 def _iso(value:Any)->str|None:
     if value is None: return None
     if hasattr(value,"isoformat"): return value.isoformat()
