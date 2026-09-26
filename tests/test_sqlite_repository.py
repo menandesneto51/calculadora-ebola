@@ -49,3 +49,22 @@ def test_multiple_exposures_persist_and_reload(tmp_path: Path):
     loaded=repo.load_exposures("EVT-X")
     assert len(loaded)==2
     assert loaded[-1]["end_date"]=="2026-09-05"
+
+
+def test_migration_applies_schema_v1_then_v2(tmp_path: Path):
+    repo=SQLiteEventRepository(tmp_path/"ebola.db")
+    repo.migrate()
+    with repo.connect() as conn:
+        versions=[r[0] for r in conn.execute("SELECT version FROM schema_version ORDER BY version")]
+        tables={r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert versions==[1,2]
+    assert "exposures" in tables
+
+def test_migration_rejects_future_schema(tmp_path: Path):
+    import pytest
+    repo=SQLiteEventRepository(tmp_path/"ebola.db")
+    repo.migrate()
+    with repo.connect() as conn:
+        conn.execute("INSERT INTO schema_version(version,applied_at) VALUES(99,'future')")
+    with pytest.raises(RuntimeError):
+        repo.migrate()
