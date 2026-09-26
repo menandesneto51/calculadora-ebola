@@ -7,6 +7,7 @@ from typing import Any
 
 from src.domain.audit import AuditEntry
 from src.domain.outbreak import OutbreakEvent
+from src.domain.exposure import Exposure
 from src.services.event_registry import EventSnapshot
 from .schema import MIGRATIONS
 
@@ -66,6 +67,24 @@ class SQLiteEventRepository:
     def load_contacts(self,event_id:str) -> list[dict[str,Any]]:
         with self.connect() as conn:
             return [dict(r) for r in conn.execute("SELECT * FROM contacts WHERE event_id=? ORDER BY contact_id",(event_id,))]
+
+    def replace_exposures(self,event_id:str,exposures:list[Exposure]) -> None:
+        now=datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.execute("DELETE FROM exposures WHERE event_id=?",(event_id,))
+            for x in exposures:
+                x.validate()
+                if x.event_id != event_id:
+                    raise ValueError("Exposição pertence a outro evento")
+                conn.execute("INSERT INTO exposures VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (x.exposure_id,x.event_id,x.contact_id,x.source_case_id,x.start_date.isoformat(),
+                     x.end_date.isoformat(),x.exposure_type,x.location,x.notes,now))
+
+    def load_exposures(self,event_id:str) -> list[dict[str,Any]]:
+        with self.connect() as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM exposures WHERE event_id=? ORDER BY contact_id,end_date,exposure_id",(event_id,)
+            )]
 
     def save_snapshot(self,s:EventSnapshot) -> None:
         with self.connect() as conn:
