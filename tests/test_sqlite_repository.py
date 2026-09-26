@@ -34,3 +34,18 @@ def test_event_status_update_preserves_identity(tmp_path: Path):
     saved=repo.get_event("EVT")
     assert saved["event_id"]=="EVT"
     assert saved["status"]=="active"
+
+
+def test_multiple_exposures_persist_and_reload(tmp_path: Path):
+    from src.domain.exposure import Exposure
+    repo=SQLiteEventRepository(tmp_path/"ebola.db"); repo.migrate()
+    event=OutbreakEvent("EVT-X","Evento X","MT"); repo.upsert_event(event)
+    repo.replace_contacts("EVT-X",[{"identificador":"C1"}])
+    exposures=[
+        Exposure("E1","EVT-X","C1","Caso índice",date(2026,9,1),date(2026,9,1),"Contato domiciliar"),
+        Exposure("E2","EVT-X","C1","Caso índice",date(2026,9,3),date(2026,9,5),"Cuidado direto"),
+    ]
+    repo.replace_exposures("EVT-X",exposures)
+    loaded=repo.load_exposures("EVT-X")
+    assert len(loaded)==2
+    assert loaded[-1]["end_date"]=="2026-09-05"
