@@ -1,5 +1,5 @@
 """Schema SQLite V17 para desenvolvimento local controlado."""
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATIONS = {
     1: """
@@ -60,5 +60,23 @@ MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS idx_contacts_event_evolution ON contacts(event_id, evolution);
     CREATE INDEX IF NOT EXISTS idx_audit_event_time ON audit_log(event_id, occurred_at);
+    """,
+    2: """
+    CREATE TABLE IF NOT EXISTS exposures (
+        exposure_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        contact_id TEXT NOT NULL,
+        source_case_id TEXT NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        exposure_type TEXT NOT NULL,
+        location TEXT,
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (event_id, exposure_id),
+        FOREIGN KEY (event_id, contact_id) REFERENCES contacts(event_id, contact_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_exposures_contact_dates
+        ON exposures(event_id, contact_id, end_date);
     """
 }
