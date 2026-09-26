@@ -16,6 +16,7 @@ from src.domain.outbreak import OutbreakEvent
 from src.services.outbreak_summary import summarize_outbreak
 from src.services.event_registry import build_event_snapshot, snapshot_to_json, create_audit_entry
 from src.persistence.sqlite_repository import SQLiteEventRepository
+from src.services.investigation_quality import assess_investigation_quality
 
 
 # ============================================================
@@ -1427,9 +1428,45 @@ def loaded_contacts_as_editor_df() -> pd.DataFrame | None:
     return normalize_contacts_df(pd.DataFrame(mapped))
 
 
+def render_investigation_quality(contacts_df: pd.DataFrame) -> None:
+    st.subheader("6. Qualidade da investigação")
+    rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
+    quality=assess_investigation_quality(rows)
+
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Índice de qualidade",f"{quality.score}/100")
+    c2.metric("Registros",quality.total_records)
+    c3.metric("Completos",quality.complete_records)
+    c4.metric("Pendências",len(quality.issues))
+
+    st.caption(
+        "Indicador de completude e coerência estrutural. Não representa risco de infecção, "
+        "probabilidade diagnóstica ou gravidade clínica."
+    )
+    if not quality.issues:
+        st.success("Nenhuma pendência estrutural identificada nos registros carregados.")
+        return
+
+    issue_df=pd.DataFrame([{
+        "gravidade":x.severity,
+        "código":x.code,
+        "entidade":x.entity_id,
+        "descrição":x.description,
+        "ação recomendada":x.recommended_action,
+    } for x in quality.issues])
+    st.dataframe(issue_df,use_container_width=True,hide_index=True)
+    st.download_button(
+        "Baixar relatório de qualidade em CSV",
+        data=issue_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="calculadora_ebola_qualidade_investigacao.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 def render_event_summary(contacts_df: pd.DataFrame) -> None:
     """Visão executiva agregada e snapshot do evento para CIEVS/SIS."""
-    st.subheader("6. Visão executiva do evento")
+    st.subheader("7. Visão executiva do evento")
 
     if "ebola_event_id" not in st.session_state:
         st.session_state.ebola_event_id = "EBOLA-MT-001"
@@ -2085,7 +2122,7 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
 
 
 def render_chain_section(contacts_df: pd.DataFrame) -> None:
-    st.subheader("7. Mapa de possível cadeia de transmissão")
+    st.subheader("8. Mapa de possível cadeia de transmissão")
     st.markdown(
         "O mapa usa o campo **caso-origem** para montar vínculos entre o caso índice, contatos e possíveis casos secundários. "
         "Quando um contato também se tornar suspeito, confirmado ou sintomático, ele pode ser usado como caso-origem de novos contatos."
@@ -2110,7 +2147,7 @@ def render_chain_section(contacts_df: pd.DataFrame) -> None:
 
 
 def render_definitions_section() -> None:
-    st.subheader("8. Definições operacionais")
+    st.subheader("9. Definições operacionais")
 
     st.info(
         "Estas definições são operacionais para apoiar a investigação e a organização da ferramenta. "
@@ -2455,6 +2492,9 @@ def main() -> None:
         st.divider()
 
         render_investigation_intelligence(case, contacts_df)
+        st.divider()
+
+        render_investigation_quality(contacts_df)
         st.divider()
 
         render_event_summary(contacts_df)
