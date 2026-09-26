@@ -1473,6 +1473,17 @@ def render_event_manager() -> pd.DataFrame | None:
             st.session_state.ebola_event_status = event.get("status") or "monitoring"
             st.session_state.ebola_snapshot_version = repository.next_snapshot_version(event_id)
             st.session_state.ebola_loaded_contacts = repository.load_contacts(event_id)
+            loaded_exposures = repository.load_exposures(event_id)
+            st.session_state.ebola_exposure_rows = [{
+                "exposure_id": x.get("exposure_id"),
+                "contact_id": x.get("contact_id"),
+                "source_case_id": x.get("source_case_id"),
+                "start_date": coerce_date(x.get("start_date")),
+                "end_date": coerce_date(x.get("end_date")),
+                "exposure_type": x.get("exposure_type"),
+                "location": x.get("location"),
+                "notes": x.get("notes"),
+            } for x in loaded_exposures]
             st.session_state.ebola_loaded_event_id = event_id
             st.rerun()
     return None
@@ -1537,7 +1548,7 @@ def render_investigation_quality(contacts_df: pd.DataFrame) -> None:
     )
 
 
-def render_event_summary(contacts_df: pd.DataFrame) -> None:
+def render_event_summary(contacts_df: pd.DataFrame, exposures: list[Exposure] | None = None) -> None:
     """Visão executiva agregada e snapshot do evento para CIEVS/SIS."""
     st.subheader("8. Visão executiva do evento")
 
@@ -1672,6 +1683,7 @@ def render_event_summary(contacts_df: pd.DataFrame) -> None:
                 event.event_id,
                 contacts_df.where(pd.notna(contacts_df), None).to_dict(orient="records"),
             )
+            repository.replace_exposures(event.event_id, exposures or [])
             repository.save_snapshot(snapshot)
             repository.append_audit(
                 create_audit_entry(
@@ -2574,7 +2586,7 @@ def main() -> None:
         render_investigation_quality(effective_contacts_df)
         st.divider()
 
-        render_event_summary(effective_contacts_df)
+        render_event_summary(effective_contacts_df, exposures)
         st.divider()
 
         render_chain_section(effective_contacts_df)
