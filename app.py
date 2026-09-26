@@ -14,7 +14,8 @@ from src.services.investigation import assess_investigation
 from src.services.prioritization import calculate_operational_priority
 from src.domain.outbreak import OutbreakEvent
 from src.services.outbreak_summary import summarize_outbreak
-from src.services.event_registry import build_event_snapshot, snapshot_to_json
+from src.services.event_registry import build_event_snapshot, snapshot_to_json, create_audit_entry
+from src.persistence.sqlite_repository import SQLiteEventRepository
 
 
 # ============================================================
@@ -1453,6 +1454,36 @@ def render_event_summary(contacts_df: pd.DataFrame) -> None:
     if st.button("Preparar próxima versão do snapshot", use_container_width=True):
         st.session_state.ebola_snapshot_version += 1
         st.rerun()
+
+    st.markdown("#### Persistência local opcional")
+    st.caption(
+        "DEV local: os dados somente são gravados quando você aciona o botão abaixo. "
+        "O arquivo SQLite permanece em data/ e está excluído do Git."
+    )
+    if st.button("Salvar evento e contatos no SQLite local", use_container_width=True):
+        try:
+            repository = SQLiteEventRepository("data/calculadora_ebola.db")
+            repository.migrate()
+            repository.upsert_event(event)
+            repository.replace_contacts(
+                event.event_id,
+                contacts_df.where(pd.notna(contacts_df), None).to_dict(orient="records"),
+            )
+            repository.save_snapshot(snapshot)
+            repository.append_audit(
+                create_audit_entry(
+                    event,
+                    "event_saved",
+                    "event",
+                    event.event_id,
+                    details={"snapshot_version": snapshot.snapshot_version},
+                )
+            )
+            st.success(
+                f"Evento {event.event_id} salvo localmente com snapshot v{snapshot.snapshot_version}."
+            )
+        except Exception as exc:
+            st.error(f"Não foi possível persistir o evento localmente: {exc}")
 
 
 def render_chain_graph(contacts_df: pd.DataFrame) -> None:
