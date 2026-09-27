@@ -1782,13 +1782,13 @@ def render_event_summary(contacts_df: pd.DataFrame, exposures: list[Exposure] | 
         mime="application/json",
         use_container_width=True,
     )
-    if st.button("Preparar próxima versão do snapshot", use_container_width=True):
-        st.session_state.ebola_snapshot_version += 1
-        st.rerun()
+    st.caption(
+        "O snapshot é um marco imutável e deliberado. Salvar o estado de trabalho não cria snapshot automaticamente."
+    )
 
     st.markdown("#### Persistência local opcional")
     st.caption(
-        "DEV local: os dados somente são gravados quando você aciona o botão abaixo. "
+        "DEV local: o estado de trabalho e os snapshots são persistidos somente por ações explícitas. "
         "O arquivo SQLite permanece em data/ e está excluído do Git."
     )
     try:
@@ -1809,7 +1809,34 @@ def render_event_summary(contacts_df: pd.DataFrame, exposures: list[Exposure] | 
     except Exception:
         pass
 
-    if st.button("Salvar evento e contatos no SQLite local", use_container_width=True):
+    save_col, snapshot_col = st.columns(2)
+    if save_col.button("Salvar estado de trabalho", use_container_width=True):
+        try:
+            repository = SQLiteEventRepository("data/calculadora_ebola.db")
+            repository.migrate()
+            repository.upsert_event(event)
+            repository.replace_contacts(
+                event.event_id,
+                contacts_df.where(pd.notna(contacts_df), None).to_dict(orient="records"),
+            )
+            repository.replace_exposures(event.event_id, exposures or [])
+            repository.append_audit(
+                create_audit_entry(
+                    event,
+                    "working_state_saved",
+                    "event",
+                    event.event_id,
+                    details={"contacts": len(contacts_df), "exposures": len(exposures or [])},
+                )
+            )
+            st.success(f"Estado de trabalho do evento {event.event_id} salvo.")
+        except Exception as exc:
+            st.error(f"Não foi possível salvar o estado de trabalho: {exc}")
+
+    if snapshot_col.button(
+        f"Criar snapshot imutável v{snapshot.snapshot_version}",
+        use_container_width=True,
+    ):
         try:
             repository = SQLiteEventRepository("data/calculadora_ebola.db")
             repository.migrate()
@@ -1823,17 +1850,22 @@ def render_event_summary(contacts_df: pd.DataFrame, exposures: list[Exposure] | 
             repository.append_audit(
                 create_audit_entry(
                     event,
-                    "event_saved",
-                    "event",
-                    event.event_id,
-                    details={"snapshot_version": snapshot.snapshot_version},
+                    "snapshot_created",
+                    "snapshot",
+                    f"{event.event_id}:v{snapshot.snapshot_version}",
+                    details={
+                        "snapshot_version": snapshot.snapshot_version,
+                        "checksum_sha256": snapshot.checksum_sha256,
+                        "contacts": len(contacts_df),
+                        "exposures": len(exposures or []),
+                    },
                 )
             )
-            st.success(
-                f"Evento {event.event_id} salvo localmente com snapshot v{snapshot.snapshot_version}."
-            )
+            st.session_state.ebola_snapshot_version = repository.next_snapshot_version(event.event_id)
+            st.success(f"Snapshot imutável v{snapshot.snapshot_version} criado.")
+            st.rerun()
         except Exception as exc:
-            st.error(f"Não foi possível persistir o evento localmente: {exc}")
+            st.error(f"Não foi possível criar o snapshot: {exc}")
 
 
 def render_chain_graph(contacts_df: pd.DataFrame) -> None:
