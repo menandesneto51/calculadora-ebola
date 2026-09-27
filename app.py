@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.epidemiology.parameters import EpidemiologyParameters
+from src.epidemiology.timelines import contact_followup_end
 from src.services.investigation import assess_investigation
 from src.services.prioritization import calculate_operational_priority
 from src.domain.outbreak import OutbreakEvent
@@ -1284,7 +1285,7 @@ def render_epidemiological_timeline(contacts_df: pd.DataFrame, exposures: list[E
         return
     row=row.iloc[0]
     last_exposure=effective_last_exposure(selected,exposures,coerce_date(row.get("data_ultimo_contato")))
-    monitoring_end=(last_exposure + timedelta(days=21)) if last_exposure else None
+    monitoring_end=contact_followup_end(last_exposure, EpidemiologyParameters()) if last_exposure else None
     onset=coerce_date(row.get("data_inicio_sintomas"))
     timeline=build_contact_timeline(
         st.session_state.get("ebola_event_id","EBOLA-MT-001"),
@@ -1750,6 +1751,17 @@ def render_event_summary(contacts_df: pd.DataFrame, exposures: list[Exposure] | 
             "post_mortem_exposures": summary.post_mortem_exposures,
         },
         "contacts": contacts_df.where(pd.notna(contacts_df), None).to_dict(orient="records"),
+        "exposures": [{
+            "exposure_id": x.exposure_id,
+            "event_id": x.event_id,
+            "contact_id": x.contact_id,
+            "source_case_id": x.source_case_id,
+            "start_date": x.start_date.isoformat(),
+            "end_date": x.end_date.isoformat(),
+            "exposure_type": x.exposure_type,
+            "location": x.location,
+            "notes": x.notes,
+        } for x in (exposures or [])],
     }
     snapshot = build_event_snapshot(
         event,
