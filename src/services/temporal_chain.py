@@ -3,6 +3,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Literal, Any
 
+from src.domain.exposure import Exposure
+from src.epidemiology.parameters import EpidemiologyParameters
+
 Compatibility=Literal["compatible","incompatible","indeterminate"]
 
 @dataclass(frozen=True)
@@ -13,8 +16,21 @@ class TemporalLink:
     generation:int|None
     serial_interval_days:int|None
     rationale:str
+    infectiousness_compatibility:Compatibility="indeterminate"
+    incubation_compatibility:Compatibility="indeterminate"
+    exposure_start:date|None=None
+    exposure_end:date|None=None
+    incubation_min_days:int|None=None
+    incubation_max_days:int|None=None
 
-def analyze_temporal_chain(rows:list[dict[str,Any]])->list[TemporalLink]:
+def analyze_temporal_chain(
+    rows:list[dict[str,Any]],
+    exposures:list[Exposure]|None=None,
+    params:EpidemiologyParameters|None=None,
+)->list[TemporalLink]:
+    p=params or EpidemiologyParameters()
+    p.validate()
+    structured=exposures or []
     by_id={_text(r.get("identificador")):r for r in rows if _text(r.get("identificador"))}
     generations=_generations(by_id)
     links=[]
@@ -24,21 +40,56 @@ def analyze_temporal_chain(rows:list[dict[str,Any]])->list[TemporalLink]:
         if source not in by_id:
             links.append(TemporalLink(source,target,"indeterminate",None,None,"Caso-origem não disponível no conjunto analisado."))
             continue
+
         source_onset=_date(by_id[source].get("data_inicio_sintomas"))
         target_onset=_date(row.get("data_inicio_sintomas"))
-        exposure=_date(row.get("data_ultimo_contato"))
-        serial=(target_onset-source_onset).days if source_onset and target_onset else None
-        if source_onset and exposure and exposure < source_onset:
-            compatibility="incompatible"
-            rationale="Exposição registrada ocorreu antes do início de sintomas do caso-origem."
-        elif source_onset and exposure:
-            compatibility="compatible"
-            rationale="Exposição registrada ocorreu no mesmo dia ou após o início de sintomas do caso-origem."
+        relevant=[x for x in structured if x.contact_id==target and x.source_case_id==source]
+        if relevant:
+            exposure_start=min(x.start_date for x in relevant)
+            exposure_end=max(x.end_date for x in relevant)
         else:
-            compatibility="indeterminate"
-            rationale="Datas insuficientes para avaliar compatibilidade temporal."
-        links.append(TemporalLink(source,target,compatibility,generations.get(target),serial,rationale))
+            legacy=_date(row.get("data_ultimo_contato"))
+            exposure_start=legacy
+            exposure_end=legacy
+
+        serial=(target_onset-source_onset).days if source_onset and target_onset else None
+        infectiousness=_infectiousness_compatibility(source_onset,exposure_start,exposure_end)
+        incubation,inc_min,inc_max=_incubation_compatibility(target_onset,exposure_start,exposure_end,p)
+        overall=_overall(infectiousness,incubation)
+        rationale=_rationale(infectiousness,incubation,bool(relevant))
+        links.append(TemporalLink(
+            source,target,overall,generations.get(target),serial,rationale,
+            infectiousness,incubation,exposure_start,exposure_end,inc_min,inc_max,
+        ))
     return links
+
+def _infectiousness_compatibility(source_onset:date|None,start:date|None,end:date|None)->Compatibility:
+    if not source_onset or not start or not end:return "indeterminate"
+    if end < source_onset:return "incompatible"
+    return "compatible"
+
+def _incubation_compatibility(
+    target_onset:date|None,start:date|None,end:date|None,p:EpidemiologyParameters
+)->tuple[Compatibility,int|None,int|None]:
+    if not target_onset or not start or not end:return "indeterminate",None,None
+    min_days=(target_onset-end).days
+    max_days=(target_onset-start).days
+    if max_days < p.incubation_min_days or min_days > p.incubation_max_days:
+        return "incompatible",min_days,max_days
+    return "compatible",min_days,max_days
+
+def _overall(infectiousness:Compatibility,incubation:Compatibility)->Compatibility:
+    if "incompatible" in {infectiousness,incubation}:return "incompatible"
+    if infectiousness=="compatible" and incubation=="compatible":return "compatible"
+    return "indeterminate"
+
+def _rationale(infectiousness:Compatibility,incubation:Compatibility,structured:bool)->str:
+    origin="histórico estruturado de exposições" if structured else "campo legado de última exposição"
+    return (
+        f"Fonte temporal: {origin}. Compatibilidade com início de sintomas do caso-origem: "
+        f"{infectiousness}. Compatibilidade com janela protocolar de incubação: {incubation}. "
+        "Compatibilidade temporal não confirma transmissão."
+    )
 
 def _generations(by_id:dict[str,dict[str,Any]])->dict[str,int|None]:
     memo={}
