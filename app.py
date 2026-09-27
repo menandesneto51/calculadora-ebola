@@ -9,6 +9,21 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from src.epidemiology.parameters import EpidemiologyParameters
+from src.epidemiology.timelines import contact_followup_end
+from src.services.investigation import assess_investigation
+from src.services.prioritization import calculate_operational_priority
+from src.domain.outbreak import OutbreakEvent
+from src.services.outbreak_summary import summarize_outbreak
+from src.services.event_registry import build_event_snapshot, snapshot_to_json, create_audit_entry
+from src.persistence.sqlite_repository import SQLiteEventRepository
+from src.services.investigation_quality import assess_investigation_quality
+from src.domain.exposure import Exposure
+from src.services.exposure_history import effective_last_exposure
+from src.services.timeline_builder import build_contact_timeline, interval_days
+from src.services.temporal_chain import analyze_temporal_chain
+from src.services.command_center import build_command_center
+
 
 # ============================================================
 # Modelos, parâmetros e opções
@@ -16,8 +31,8 @@ import streamlit as st
 
 @dataclass(frozen=True)
 class CalculatorParams:
-    min_incubation_days: int = 4
-    max_incubation_days: int = 17
+    min_incubation_days: int = 2
+    max_incubation_days: int = 21
     wet_symptom_offset_days: int = 4
     severe_alert_offset_days: int = 5
     death_offset_days: int = 10
@@ -850,19 +865,20 @@ def sidebar_params() -> CalculatorParams:
     with st.sidebar:
         st.header("Parâmetros editáveis")
 
-        use_classic = st.toggle(
-            "Usar incubação clássica 2–21 dias",
+        use_legacy_incubation = st.toggle(
+            "Usar configuração legada de incubação",
             value=False,
-            help="Guias técnicos costumam citar 2–21 dias. O padrão operacional 4–17 dias permanece ajustável.",
+            help="A V17 utiliza 2–21 dias como padrão epidemiológico. Ative somente para reproduzir cálculos históricos da V16.",
         )
 
-        if use_classic:
-            min_inc = 2
-            max_inc = 21
-            st.info("Incubação configurada como 2–21 dias.")
-        else:
+        if use_legacy_incubation:
             min_inc = st.number_input("Incubação mínima, em dias", min_value=1, max_value=60, value=4)
             max_inc = st.number_input("Incubação máxima, em dias", min_value=1, max_value=60, value=17)
+            st.warning("Modo legado ativo. Os resultados devem ser interpretados como reprodução de configuração histórica.")
+        else:
+            min_inc = 2
+            max_inc = 21
+            st.info("Protocolo V17: incubação configurada como 2–21 dias.")
 
         wet_offset = st.number_input(
             "Dias após início dos sintomas para alerta de sintomas úmidos/tardios",
@@ -1118,6 +1134,11 @@ def render_contact_editor() -> pd.DataFrame:
         st.error(f"Não foi possível ler o arquivo importado: {exc}")
         default_df = default_contacts_df()
 
+    loaded_df = loaded_contacts_as_editor_df()
+    if uploaded is None and loaded_df is not None:
+        default_df = loaded_df
+        st.caption(f"Contatos recuperados do evento {st.session_state.get('ebola_loaded_event_id', '')}.")
+
     contacts_df = st.data_editor(
         default_df,
         num_rows="dynamic",
@@ -1157,12 +1178,216 @@ def render_contact_editor() -> pd.DataFrame:
     return normalize_contacts_df(contacts_df)
 
 
+def render_exposure_editor(contacts_df: pd.DataFrame) -> list[Exposure]:
+    st.subheader("4. Histórico de exposições — V17")
+    st.caption(
+        "Registre zero, uma ou várias exposições por contato. Quando houver histórico estruturado, "
+        "a última exposição efetiva será derivada deste histórico; caso contrário, permanece o campo legado."
+    )
+
+    contact_ids=contacts_df["identificador"].astype(str).tolist() if not contacts_df.empty else []
+    default_rows=st.session_state.get("ebola_exposure_rows", [])
+    exposure_df=pd.DataFrame(default_rows) if default_rows else pd.DataFrame(columns=[
+        "exposure_id","contact_id","source_case_id","start_date","end_date","exposure_type","location","notes"
+    ])
+
+    edited=st.data_editor(
+        exposure_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "exposure_id": st.column_config.TextColumn("ID exposição",required=True),
+            "contact_id": st.column_config.SelectboxColumn("Contato",options=contact_ids,required=True),
+            "source_case_id": st.column_config.TextColumn("Caso-origem",required=True),
+            "start_date": st.column_config.DateColumn("Início",format="DD/MM/YYYY",required=True),
+            "end_date": st.column_config.DateColumn("Fim",format="DD/MM/YYYY",required=True),
+            "exposure_type": st.column_config.SelectboxColumn("Tipo",options=[x for x in EXPOSURE_TYPE_OPTIONS if x],required=True),
+            "location": st.column_config.TextColumn("Local"),
+            "notes": st.column_config.TextColumn("Observação"),
+        },
+        key="exposure_editor_v17",
+    )
+
+    exposures=[]
+    event_id=st.session_state.get("ebola_event_id","EBOLA-MT-001")
+    for _,row in edited.iterrows():
+        eid=clean_text(row.get("exposure_id"))
+        cid=clean_text(row.get("contact_id"))
+        source=clean_text(row.get("source_case_id"))
+        start=coerce_date(row.get("start_date"))
+        end=coerce_date(row.get("end_date"))
+        etype=clean_text(row.get("exposure_type"))
+        if not any([eid,cid,source,start,end,etype]):
+            continue
+        if not all([eid,cid,source,start,end,etype]):
+            st.warning(f"Exposição {eid or '(sem ID)'} incompleta; não será usada nos cálculos.")
+            continue
+        try:
+            item=Exposure(eid,event_id,cid,source,start,end,etype,clean_text(row.get("location")) or None,clean_text(row.get("notes")) or None)
+            item.validate()
+            exposures.append(item)
+        except ValueError as exc:
+            st.error(f"Exposição {eid or '(sem ID)'}: {exc}")
+
+    st.session_state.ebola_exposure_rows=edited.where(pd.notna(edited),None).to_dict(orient="records")
+    if exposures:
+        st.success(f"{len(exposures)} exposição(ões) estruturada(s) válida(s).")
+    return exposures
+
+
+def apply_effective_exposures(contacts_df: pd.DataFrame, exposures: list[Exposure]) -> pd.DataFrame:
+    result=contacts_df.copy()
+    if result.empty:
+        return result
+    for idx,row in result.iterrows():
+        cid=clean_text(row.get("identificador"))
+        legacy=coerce_date(row.get("data_ultimo_contato"))
+        effective=effective_last_exposure(cid,exposures,legacy)
+        if effective is not None:
+            result.at[idx,"data_ultimo_contato"]=effective
+    return result
+
+
+def render_command_center(contacts_df: pd.DataFrame, exposures: list[Exposure]) -> None:
+    st.subheader("5. Investigation Command Center — V17")
+    rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
+    summary=build_command_center(rows,exposures,date.today())
+    a,b,c,d=st.columns(4)
+    a.metric("Contatos",summary.contacts); b.metric("Exposições",summary.exposures)
+    c.metric("Qualidade",f"{summary.quality_score}/100"); d.metric("Pendências",summary.quality_issues)
+    e,f,g,h=st.columns(4)
+    e.metric("Sintomáticos/suspeitos",summary.symptomatic_or_suspected); f.metric("Confirmados",summary.confirmed)
+    g.metric("Óbitos",summary.deaths); h.metric("Monitoramentos vencidos",summary.monitoring_overdue)
+    i,j,k,l=st.columns(4)
+    i.metric("Vínculos temporais",summary.temporal_links); j.metric("Incompatíveis",summary.incompatible_links)
+    k.metric("Indeterminados",summary.indeterminate_links); l.metric("Encerram hoje",summary.monitoring_due)
+    attention=[]
+    if summary.monitoring_overdue: attention.append(f"{summary.monitoring_overdue} monitoramento(s) vencido(s)")
+    if summary.incompatible_links: attention.append(f"{summary.incompatible_links} vínculo(s) temporalmente incompatível(is)")
+    if summary.quality_issues: attention.append(f"{summary.quality_issues} pendência(s) de qualidade")
+    if summary.symptomatic_or_suspected: attention.append(f"{summary.symptomatic_or_suspected} contato(s) sintomático(s)/suspeito(s)")
+    if attention: st.warning("Revisão operacional prioritária:\n\n- "+"\n- ".join(attention))
+    else: st.success("Nenhuma pendência agregada identificada pelos motores V17.")
+    if summary.promotion_allowed:
+        st.success("Quality gate: sem bloqueadores estruturais para promoção técnica HML/PRD.")
+    else:
+        st.error(
+            f"Quality gate BLOQUEADO: {summary.blocking_issues} erro(s) estrutural(is). "
+            f"Códigos: {', '.join(summary.blocking_codes)}. Corrigir ou documentar justificativa antes de HML/PRD."
+        )
+    st.caption("Visão executiva derivada dos módulos V17; não substitui classificação, avaliação clínica ou decisão sanitária.")
+
+
+def render_epidemiological_timeline(contacts_df: pd.DataFrame, exposures: list[Exposure]) -> None:
+    st.subheader("6. Linha temporal epidemiológica — V17")
+    if contacts_df.empty:
+        st.info("Inclua contatos para construir linhas temporais.")
+        return
+
+    contact_ids=[clean_text(x) for x in contacts_df["identificador"].tolist() if clean_text(x)]
+    selected=st.selectbox("Contato para linha temporal",contact_ids,key="timeline_contact")
+    row=contacts_df[contacts_df["identificador"].astype(str)==selected]
+    if row.empty:
+        return
+    row=row.iloc[0]
+    last_exposure=effective_last_exposure(selected,exposures,coerce_date(row.get("data_ultimo_contato")))
+    monitoring_end=contact_followup_end(last_exposure, EpidemiologyParameters()) if last_exposure else None
+    onset=coerce_date(row.get("data_inicio_sintomas"))
+    timeline=build_contact_timeline(
+        st.session_state.get("ebola_event_id","EBOLA-MT-001"),
+        selected,
+        exposures=exposures,
+        symptom_onset=onset,
+        monitoring_end=monitoring_end,
+    )
+    if not timeline:
+        st.info("Nenhum marco temporal disponível para este contato.")
+        return
+
+    timeline_df=pd.DataFrame([{
+        "data":x.event_date,
+        "marco":x.event_type,
+        "proveniência":x.provenance,
+        "fonte":x.source,
+        "observação":x.notes,
+    } for x in timeline])
+    st.dataframe(timeline_df,use_container_width=True,hide_index=True)
+
+    if last_exposure and onset:
+        delta=interval_days(last_exposure,onset)
+        st.metric("Intervalo exposição final → sintomas",f"{delta} dia(s)")
+        st.caption(
+            "Intervalo temporal observado entre datas registradas. Não demonstra, isoladamente, "
+            "que a exposição selecionada causou a infecção."
+        )
+
+    all_rows=[]
+    for _,contact in contacts_df.iterrows():
+        cid=clean_text(contact.get("identificador"))
+        legacy=coerce_date(contact.get("data_ultimo_contato"))
+        effective=effective_last_exposure(cid,exposures,legacy)
+        onset_date=coerce_date(contact.get("data_inicio_sintomas"))
+        if effective:
+            all_rows.append({
+                "contato":cid,
+                "última exposição efetiva":effective,
+                "início sintomas":onset_date,
+                "intervalo dias":interval_days(effective,onset_date),
+                "origem última exposição":"histórico estruturado" if any(x.contact_id==cid for x in exposures) else "campo legado",
+            })
+    if all_rows:
+        with st.expander("Resumo temporal do evento",expanded=False):
+            st.dataframe(pd.DataFrame(all_rows),use_container_width=True,hide_index=True)
+
+
+def render_temporal_chain_analysis(contacts_df: pd.DataFrame, exposures: list[Exposure]) -> None:
+    st.subheader("7. Análise temporal da cadeia — V17")
+    rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
+    links=analyze_temporal_chain(rows, exposures, EpidemiologyParameters())
+    if not links:
+        st.info("Ainda não há vínculos entre contatos suficientes para análise temporal.")
+        return
+
+    data=pd.DataFrame([{
+        "caso-origem":x.source_id,
+        "contato/caso":x.target_id,
+        "compatibilidade global":x.compatibility,
+        "compatibilidade infectividade":x.infectiousness_compatibility,
+        "compatibilidade incubação":x.incubation_compatibility,
+        "exposição inicial":x.exposure_start,
+        "exposição final":x.exposure_end,
+        "incubação mínima possível (dias)":x.incubation_min_days,
+        "incubação máxima possível (dias)":x.incubation_max_days,
+        "geração topológica":x.generation,
+        "intervalo entre sintomas (dias)":x.serial_interval_days,
+        "fundamentação":x.rationale,
+    } for x in links])
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Vínculos",len(links))
+    c2.metric("Compatíveis",sum(x.compatibility=="compatible" for x in links))
+    c3.metric("Incompatíveis",sum(x.compatibility=="incompatible" for x in links))
+    c4.metric("Indeterminados",sum(x.compatibility=="indeterminate" for x in links))
+    st.dataframe(data,use_container_width=True,hide_index=True)
+    st.caption(
+        "Compatibilidade temporal e geração são construções analíticas. Um vínculo compatível não confirma transmissão. "
+        "O intervalo entre sintomas só é calculado quando ambas as datas estão registradas."
+    )
+    st.download_button(
+        "Baixar análise temporal da cadeia",
+        data=data.to_csv(index=False).encode("utf-8-sig"),
+        file_name="calculadora_ebola_cadeia_temporal_v17.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 def render_contacts_analysis(
     contacts_df: pd.DataFrame,
     case: CaseCalculation,
     params: CalculatorParams,
 ) -> pd.DataFrame:
-    st.subheader("4. Monitoramento de contatos")
+    st.subheader("8. Monitoramento de contatos")
 
     evaluated = evaluate_contacts(contacts_df, case, params)
 
@@ -1216,6 +1441,444 @@ def render_contacts_analysis(
     return evaluated
 
 
+
+
+def render_investigation_intelligence(
+    case: CaseCalculation,
+    contacts_df: pd.DataFrame,
+) -> None:
+    """Painel V17 complementar; não altera os cálculos legados da V16."""
+    st.subheader("9. Inteligência da investigação — V17")
+    st.caption(
+        "Camada de apoio operacional com proveniência e priorização. "
+        "Não realiza diagnóstico nem substitui classificação oficial da vigilância."
+    )
+
+    post_mortem = any(
+        value == "Sim"
+        for value in [
+            case.body_manipulation,
+            case.funeral_or_wake,
+            case.body_transport,
+            case.post_mortem_contact,
+        ]
+    )
+
+    case_assessment = assess_investigation(
+        last_exposure=case.last_exposure_date,
+        symptom_onset=case.symptom_onset_date,
+        detection_date=case.detection_date,
+        death_date=case.death_date,
+        evolution="Óbito" if case.case_status == "Óbito" else None,
+        symptomatic=False,
+        post_mortem_exposure=post_mortem,
+        has_outcome=case.case_status != "Ignorado",
+        has_source_case=True,
+        params=EpidemiologyParameters(),
+    )
+
+    total_alerts = len(case_assessment.alerts)
+    critical = sum(a.priority == "critical" for a in case_assessment.alerts)
+    high = sum(a.priority == "high" for a in case_assessment.alerts)
+    inconsistencies = len(case_assessment.validation_issues)
+    case_priority = calculate_operational_priority(
+        case_assessment.alerts,
+        validation_issue_count=inconsistencies,
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Alertas do caso", total_alerts)
+    m2.metric("Críticos", critical)
+    m3.metric("Alta prioridade", high)
+    m4.metric("Inconsistências", inconsistencies)
+
+    st.markdown("#### Prioridade operacional explicável")
+    st.progress(case_priority.score / 100)
+    st.write(f"**Índice operacional:** {case_priority.score}/100 — {case_priority.interpretation}")
+    st.caption(
+        "Este índice serve exclusivamente para ordenar pendências de investigação. "
+        "Não representa probabilidade de doença, gravidade clínica ou classificação oficial."
+    )
+    if case_priority.factors:
+        factor_df = pd.DataFrame([
+            {"fator": f.code, "pontos": f.points, "justificativa": f.rationale}
+            for f in case_priority.factors
+        ])
+        st.dataframe(factor_df, use_container_width=True, hide_index=True)
+
+    if case_assessment.monitoring_end is not None:
+        st.caption(
+            f"Protocolo {case_assessment.monitoring_end.protocol_version} · "
+            f"fonte do resultado: {case_assessment.monitoring_end.source_type} · "
+            f"método: {case_assessment.monitoring_end.calculation_method}"
+        )
+
+    for issue in case_assessment.validation_issues:
+        st.warning(f"[{issue.code}] {issue.description} — {issue.recommended_action}")
+
+    for alert in case_assessment.alerts:
+        message = f"**{alert.title}** — {alert.rationale}  \nAção sugerida: {alert.recommended_action}"
+        if alert.priority == "critical":
+            st.error(message)
+        elif alert.priority == "high":
+            st.warning(message)
+        else:
+            st.info(message)
+
+    if contacts_df.empty:
+        st.info("Inclua contatos para gerar inteligência individual de seguimento.")
+        return
+
+    contact_rows = []
+    post_mortem_types = {"Manipulação do corpo", "Velório/funeral", "Sepultamento", "Limpeza/desinfecção"}
+    for _, row in contacts_df.iterrows():
+        last_contact = coerce_date(row.get("data_ultimo_contato"))
+        evolution = clean_text(row.get("evolucao"))
+        assessment = assess_investigation(
+            last_exposure=last_contact,
+            symptom_onset=coerce_date(row.get("data_inicio_sintomas")),
+            evolution=evolution,
+            symptomatic=evolution in {"Sintomático", "Suspeito", "Confirmado"},
+            post_mortem_exposure=clean_text(row.get("tipo_contato")) in post_mortem_types,
+            has_outcome=evolution not in {"", "Em monitoramento"},
+            has_source_case=bool(clean_text(row.get("caso_origem"))),
+            params=EpidemiologyParameters(),
+        )
+        operational_priority = calculate_operational_priority(
+            assessment.alerts,
+            validation_issue_count=len(assessment.validation_issues),
+        )
+        for alert in assessment.alerts:
+            contact_rows.append({
+                "identificador": clean_text(row.get("identificador")),
+                "índice operacional": operational_priority.score,
+                "nível operacional": operational_priority.level,
+                "prioridade": alert.priority,
+                "código": alert.code,
+                "alerta": alert.title,
+                "ação sugerida": alert.recommended_action,
+            })
+
+    if contact_rows:
+        intelligence_df = pd.DataFrame(contact_rows)
+        priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        intelligence_df["_ordem"] = intelligence_df["prioridade"].map(priority_order).fillna(9)
+        intelligence_df = intelligence_df.sort_values(["_ordem", "identificador"]).drop(columns=["_ordem"])
+        st.markdown("#### Fila operacional priorizada")
+        st.dataframe(intelligence_df, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Baixar fila de inteligência em CSV",
+            data=intelligence_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="calculadora_ebola_inteligencia_v17.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    else:
+        st.success("Nenhum alerta operacional V17 identificado nos contatos carregados.")
+
+
+def render_event_manager() -> pd.DataFrame | None:
+    """Gerencia eventos locais sem persistência implícita."""
+    st.sidebar.divider()
+    st.sidebar.header("Investigações locais")
+    repository = SQLiteEventRepository("data/calculadora_ebola.db")
+    try:
+        repository.migrate()
+        events = repository.list_events()
+    except Exception as exc:
+        st.sidebar.warning(f"SQLite local indisponível: {exc}")
+        return None
+
+    if not events:
+        st.sidebar.caption("Nenhuma investigação persistida localmente.")
+        return None
+
+    labels = ["— nova investigação —"] + [
+        f"{e['event_id']} · {e['name']} · {e['status']}" for e in events
+    ]
+    selected = st.sidebar.selectbox("Abrir investigação", labels, index=0)
+    if selected == "— nova investigação —":
+        return None
+
+    event_id = selected.split(" · ", 1)[0]
+    if st.sidebar.button("Carregar evento selecionado", use_container_width=True):
+        event = repository.get_event(event_id)
+        if event:
+            st.session_state.ebola_event_id = event["event_id"]
+            st.session_state.ebola_event_name = event["name"]
+            st.session_state.ebola_event_municipality = event.get("municipality") or ""
+            st.session_state.ebola_event_status = event.get("status") or "monitoring"
+            st.session_state.ebola_snapshot_version = repository.next_snapshot_version(event_id)
+            st.session_state.ebola_loaded_contacts = repository.load_contacts(event_id)
+            loaded_exposures = repository.load_exposures(event_id)
+            st.session_state.ebola_exposure_rows = [{
+                "exposure_id": x.get("exposure_id"),
+                "contact_id": x.get("contact_id"),
+                "source_case_id": x.get("source_case_id"),
+                "start_date": coerce_date(x.get("start_date")),
+                "end_date": coerce_date(x.get("end_date")),
+                "exposure_type": x.get("exposure_type"),
+                "location": x.get("location"),
+                "notes": x.get("notes"),
+            } for x in loaded_exposures]
+            st.session_state.ebola_loaded_event_id = event_id
+            st.rerun()
+    return None
+
+
+def loaded_contacts_as_editor_df() -> pd.DataFrame | None:
+    rows = st.session_state.get("ebola_loaded_contacts")
+    if not rows:
+        return None
+    mapped = []
+    for x in rows:
+        mapped.append({
+            "identificador": x.get("contact_id"),
+            "nome_codigo": "",
+            "caso_origem": x.get("source_case_id"),
+            "data_ultimo_contato": coerce_date(x.get("exposure_date")),
+            "tipo_contato": x.get("exposure_type"),
+            "municipio": x.get("municipality"),
+            "risco": x.get("risk"),
+            "evolucao": x.get("evolution"),
+            "data_inicio_sintomas": coerce_date(x.get("symptom_onset_date")),
+            "data_fim_transmissibilidade": coerce_date(x.get("transmission_end_date")),
+            "data_ultima_avaliacao": coerce_date(x.get("last_assessment_date")),
+            "observacao": x.get("observation"),
+        })
+    return normalize_contacts_df(pd.DataFrame(mapped))
+
+
+def render_investigation_quality(contacts_df: pd.DataFrame, exposures: list[Exposure]) -> None:
+    st.subheader("10. Qualidade da investigação")
+    rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
+    quality=assess_investigation_quality(rows, exposures)
+
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Índice de qualidade",f"{quality.score}/100")
+    c2.metric("Registros",quality.total_records)
+    c3.metric("Completos",quality.complete_records)
+    c4.metric("Pendências",len(quality.issues))
+
+    st.caption(
+        "Indicador de completude e coerência estrutural. Não representa risco de infecção, "
+        "probabilidade diagnóstica ou gravidade clínica."
+    )
+    if not quality.issues:
+        st.success("Nenhuma pendência estrutural identificada nos registros carregados.")
+        return
+
+    issue_df=pd.DataFrame([{
+        "gravidade":x.severity,
+        "código":x.code,
+        "entidade":x.entity_id,
+        "descrição":x.description,
+        "ação recomendada":x.recommended_action,
+    } for x in quality.issues])
+    st.dataframe(issue_df,use_container_width=True,hide_index=True)
+    st.download_button(
+        "Baixar relatório de qualidade em CSV",
+        data=issue_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="calculadora_ebola_qualidade_investigacao.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+def render_event_summary(contacts_df: pd.DataFrame, exposures: list[Exposure] | None = None) -> None:
+    """Visão executiva agregada e snapshot do evento para CIEVS/SIS."""
+    st.subheader("11. Visão executiva do evento")
+
+    if "ebola_event_id" not in st.session_state:
+        st.session_state.ebola_event_id = "EBOLA-MT-001"
+    if "ebola_event_name" not in st.session_state:
+        st.session_state.ebola_event_name = "Investigação Ebola"
+    if "ebola_event_municipality" not in st.session_state:
+        st.session_state.ebola_event_municipality = ""
+    if "ebola_snapshot_version" not in st.session_state:
+        st.session_state.ebola_snapshot_version = 1
+    if "ebola_event_status" not in st.session_state:
+        st.session_state.ebola_event_status = "monitoring"
+
+    with st.expander("Identificação do evento", expanded=False):
+        event_id = st.text_input(
+            "ID do evento",
+            key="ebola_event_id",
+            help="Use um identificador institucional estável e sem dados pessoais.",
+        )
+        event_name = st.text_input("Nome operacional do evento", key="ebola_event_name")
+        municipality = st.text_input(
+            "Município/local de referência",
+            key="ebola_event_municipality",
+            help="Campo operacional; não altera os cálculos epidemiológicos.",
+        )
+        event_status = st.selectbox(
+            "Status operacional",
+            options=["monitoring", "active", "controlled", "closed"],
+            key="ebola_event_status",
+            help="A alteração só é persistida quando o botão de salvar for acionado.",
+        )
+
+    event = OutbreakEvent(
+        event_id=event_id.strip(),
+        name=event_name.strip(),
+        jurisdiction="Mato Grosso",
+        status=event_status,
+        municipality=municipality.strip() or None,
+        state="MT",
+    )
+    try:
+        event.validate()
+    except ValueError as exc:
+        st.error(f"Evento inválido: {exc}")
+        return
+
+    summary = summarize_outbreak(event, contacts_df)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Contatos", summary.total_contacts)
+    c2.metric("Em monitoramento", summary.active_monitoring)
+    c3.metric("Sintomáticos/suspeitos", summary.symptomatic_or_suspected)
+    c4.metric("Confirmados", summary.confirmed)
+
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Óbitos", summary.deaths)
+    c6.metric("Encerrados/descartados", summary.closed_or_discarded)
+    c7.metric("Sem caso-origem", summary.missing_source_case)
+    c8.metric("Exposições pós-morte", summary.post_mortem_exposures)
+
+    st.caption(
+        f"Evento {event.event_id} · jurisdição {event.jurisdiction} · "
+        f"protocolo {event.protocol_version}. Resumo agregado para apoio operacional."
+    )
+
+    snapshot_payload = {
+        "summary": {
+            "total_contacts": summary.total_contacts,
+            "active_monitoring": summary.active_monitoring,
+            "symptomatic_or_suspected": summary.symptomatic_or_suspected,
+            "confirmed": summary.confirmed,
+            "deaths": summary.deaths,
+            "closed_or_discarded": summary.closed_or_discarded,
+            "missing_source_case": summary.missing_source_case,
+            "post_mortem_exposures": summary.post_mortem_exposures,
+        },
+        "contacts": contacts_df.where(pd.notna(contacts_df), None).to_dict(orient="records"),
+        "exposures": [{
+            "exposure_id": x.exposure_id,
+            "event_id": x.event_id,
+            "contact_id": x.contact_id,
+            "source_case_id": x.source_case_id,
+            "start_date": x.start_date.isoformat(),
+            "end_date": x.end_date.isoformat(),
+            "exposure_type": x.exposure_type,
+            "location": x.location,
+            "notes": x.notes,
+        } for x in (exposures or [])],
+    }
+    snapshot = build_event_snapshot(
+        event,
+        snapshot_payload,
+        snapshot_version=int(st.session_state.ebola_snapshot_version),
+    )
+    snapshot_json = snapshot_to_json(snapshot)
+
+    st.markdown("#### Snapshot auditável")
+    s1, s2, s3 = st.columns([1, 1, 2])
+    s1.metric("Versão", snapshot.snapshot_version)
+    s2.metric("Protocolo", snapshot.protocol_version)
+    s3.code(snapshot.checksum_sha256, language=None)
+    st.download_button(
+        "Baixar snapshot JSON do evento",
+        data=snapshot_json.encode("utf-8"),
+        file_name=f"{event.event_id}_snapshot_v{snapshot.snapshot_version}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    st.caption(
+        "O snapshot é um marco imutável e deliberado. Salvar o estado de trabalho não cria snapshot automaticamente."
+    )
+
+    st.markdown("#### Persistência local opcional")
+    st.caption(
+        "DEV local: o estado de trabalho e os snapshots são persistidos somente por ações explícitas. "
+        "O arquivo SQLite permanece em data/ e está excluído do Git."
+    )
+    try:
+        repository = SQLiteEventRepository("data/calculadora_ebola.db")
+        repository.migrate()
+        audit_rows = repository.audit_for_event(event.event_id)
+        snapshot_rows = repository.list_snapshots(event.event_id)
+        if audit_rows or snapshot_rows:
+            with st.expander("Histórico local do evento", expanded=False):
+                if snapshot_rows:
+                    st.markdown("**Snapshots persistidos**")
+                    st.dataframe(pd.DataFrame(snapshot_rows), use_container_width=True, hide_index=True)
+                if audit_rows:
+                    st.markdown("**Trilha de auditoria**")
+                    audit_display = pd.DataFrame(audit_rows)
+                    safe_cols = [x for x in ["action","entity_type","entity_id","actor","occurred_at"] if x in audit_display.columns]
+                    st.dataframe(audit_display[safe_cols], use_container_width=True, hide_index=True)
+    except Exception:
+        pass
+
+    save_col, snapshot_col = st.columns(2)
+    if save_col.button("Salvar estado de trabalho", use_container_width=True):
+        try:
+            repository = SQLiteEventRepository("data/calculadora_ebola.db")
+            repository.migrate()
+            repository.upsert_event(event)
+            repository.replace_contacts(
+                event.event_id,
+                contacts_df.where(pd.notna(contacts_df), None).to_dict(orient="records"),
+            )
+            repository.replace_exposures(event.event_id, exposures or [])
+            repository.append_audit(
+                create_audit_entry(
+                    event,
+                    "working_state_saved",
+                    "event",
+                    event.event_id,
+                    details={"contacts": len(contacts_df), "exposures": len(exposures or [])},
+                )
+            )
+            st.success(f"Estado de trabalho do evento {event.event_id} salvo.")
+        except Exception as exc:
+            st.error(f"Não foi possível salvar o estado de trabalho: {exc}")
+
+    if snapshot_col.button(
+        f"Criar snapshot imutável v{snapshot.snapshot_version}",
+        use_container_width=True,
+    ):
+        try:
+            repository = SQLiteEventRepository("data/calculadora_ebola.db")
+            repository.migrate()
+            repository.upsert_event(event)
+            repository.replace_contacts(
+                event.event_id,
+                contacts_df.where(pd.notna(contacts_df), None).to_dict(orient="records"),
+            )
+            repository.replace_exposures(event.event_id, exposures or [])
+            repository.save_snapshot(snapshot)
+            repository.append_audit(
+                create_audit_entry(
+                    event,
+                    "snapshot_created",
+                    "snapshot",
+                    f"{event.event_id}:v{snapshot.snapshot_version}",
+                    details={
+                        "snapshot_version": snapshot.snapshot_version,
+                        "checksum_sha256": snapshot.checksum_sha256,
+                        "contacts": len(contacts_df),
+                        "exposures": len(exposures or []),
+                    },
+                )
+            )
+            st.session_state.ebola_snapshot_version = repository.next_snapshot_version(event.event_id)
+            st.success(f"Snapshot imutável v{snapshot.snapshot_version} criado.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Não foi possível criar o snapshot: {exc}")
 
 
 def render_chain_graph(contacts_df: pd.DataFrame) -> None:
@@ -1724,7 +2387,7 @@ def render_chain_graph(contacts_df: pd.DataFrame) -> None:
 
 
 def render_chain_section(contacts_df: pd.DataFrame) -> None:
-    st.subheader("5. Mapa de possível cadeia de transmissão")
+    st.subheader("12. Mapa de possível cadeia de transmissão")
     st.markdown(
         "O mapa usa o campo **caso-origem** para montar vínculos entre o caso índice, contatos e possíveis casos secundários. "
         "Quando um contato também se tornar suspeito, confirmado ou sintomático, ele pode ser usado como caso-origem de novos contatos."
@@ -1749,7 +2412,7 @@ def render_chain_section(contacts_df: pd.DataFrame) -> None:
 
 
 def render_definitions_section() -> None:
-    st.subheader("6. Definições operacionais")
+    st.subheader("13. Definições operacionais")
 
     st.info(
         "Estas definições são operacionais para apoiar a investigação e a organização da ferramenta. "
@@ -2038,6 +2701,7 @@ def render_interpretation() -> None:
 def main() -> None:
     configure_page()
     params = sidebar_params()
+    render_event_manager()
 
     (
         last_exposure_date,
@@ -2089,10 +2753,32 @@ def main() -> None:
         contacts_df = render_contact_editor()
         st.divider()
 
-        render_contacts_analysis(contacts_df, case, params)
+        exposures = render_exposure_editor(contacts_df)
+        effective_contacts_df = apply_effective_exposures(contacts_df, exposures)
         st.divider()
 
-        render_chain_section(contacts_df)
+        render_command_center(effective_contacts_df, exposures)
+        st.divider()
+
+        render_epidemiological_timeline(effective_contacts_df, exposures)
+        st.divider()
+
+        render_temporal_chain_analysis(effective_contacts_df, exposures)
+        st.divider()
+
+        render_contacts_analysis(effective_contacts_df, case, params)
+        st.divider()
+
+        render_investigation_intelligence(case, effective_contacts_df)
+        st.divider()
+
+        render_investigation_quality(effective_contacts_df, exposures)
+        st.divider()
+
+        render_event_summary(effective_contacts_df, exposures)
+        st.divider()
+
+        render_chain_section(effective_contacts_df)
         st.divider()
 
         render_definitions_section()
