@@ -1642,10 +1642,10 @@ def loaded_contacts_as_editor_df() -> pd.DataFrame | None:
     return normalize_contacts_df(pd.DataFrame(mapped))
 
 
-def render_investigation_quality(contacts_df: pd.DataFrame) -> None:
+def render_investigation_quality(contacts_df: pd.DataFrame, exposures: list[Exposure]) -> None:
     st.subheader("10. Qualidade da investigação")
     rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
-    quality=assess_investigation_quality(rows)
+    quality=assess_investigation_quality(rows, exposures)
 
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Índice de qualidade",f"{quality.score}/100")
@@ -2765,7 +2765,7 @@ def main() -> None:
         render_investigation_intelligence(case, effective_contacts_df)
         st.divider()
 
-        render_investigation_quality(effective_contacts_df)
+        render_investigation_quality(effective_contacts_df, exposures)
         st.divider()
 
         render_event_summary(effective_contacts_df, exposures)
