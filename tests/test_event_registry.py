@@ -34,5 +34,7 @@ def test_snapshot_payload_can_preserve_structured_exposures():
         }],
     }
     snapshot=build_event_snapshot(event,payload,snapshot_version=1)
-    assert snapshot.payload["exposures"][0]["exposure_id"]=="EXP-1"
-    assert snapshot.payload["exposures"][0]["contact_id"]=="C1"
+    assert snapshot.payload["payload"]["exposures"][0]["exposure_id"]=="EXP-1"
+    assert snapshot.payload["payload"]["exposures"][0]["contact_id"]=="C1"
+    doc=json.loads(snapshot_to_json(snapshot))
+    assert doc["payload"]["exposures"][0]["exposure_id"]=="EXP-1"
