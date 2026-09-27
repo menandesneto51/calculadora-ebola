@@ -68,3 +68,24 @@ def test_migration_rejects_future_schema(tmp_path: Path):
         conn.execute("INSERT INTO schema_version(version,applied_at) VALUES(99,'future')")
     with pytest.raises(RuntimeError):
         repo.migrate()
+
+
+def test_working_state_can_be_saved_repeatedly_without_snapshot_collision(tmp_path: Path):
+    event=OutbreakEvent(event_id="EV-WORK",name="Estado mutável",jurisdiction="MT")
+    repo=SQLiteEventRepository(tmp_path/"ebola.db")
+    repo.migrate()
+    repo.upsert_event(event)
+    repo.replace_contacts("EV-WORK",[{"identificador":"C1","evolucao":"Em monitoramento"}])
+    repo.replace_contacts("EV-WORK",[{"identificador":"C1","evolucao":"Encerrado"}])
+    assert repo.load_contacts("EV-WORK")[0]["evolution"]=="Encerrado"
+    assert repo.list_snapshots("EV-WORK")==[]
+
+def test_snapshot_version_advances_only_after_snapshot_is_persisted(tmp_path: Path):
+    event=OutbreakEvent(event_id="EV-SNAP",name="Snapshot",jurisdiction="MT")
+    repo=SQLiteEventRepository(tmp_path/"ebola.db")
+    repo.migrate()
+    repo.upsert_event(event)
+    assert repo.next_snapshot_version("EV-SNAP")==1
+    snapshot=build_event_snapshot(event,{"contacts":[],"exposures":[]},snapshot_version=1)
+    repo.save_snapshot(snapshot)
+    assert repo.next_snapshot_version("EV-SNAP")==2
