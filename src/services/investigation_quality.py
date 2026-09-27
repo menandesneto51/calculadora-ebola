@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from src.domain.exposure import Exposure
+
 @dataclass(frozen=True)
 class QualityIssue:
     severity: str
@@ -20,7 +22,7 @@ class InvestigationQuality:
 
 _REQUIRED = ("identificador","data_ultimo_contato","tipo_contato","evolucao")
 
-def assess_investigation_quality(rows:list[dict[str,Any]]) -> InvestigationQuality:
+def assess_investigation_quality(rows:list[dict[str,Any]], exposures:list[Exposure]|None=None) -> InvestigationQuality:
     issues:list[QualityIssue]=[]
     ids=[_text(r.get("identificador")) for r in rows]
     valid_ids={x for x in ids if x}
@@ -54,6 +56,35 @@ def assess_investigation_quality(rows:list[dict[str,Any]]) -> InvestigationQuali
     for node in graph:
         if _has_cycle(node,graph):
             issues.append(QualityIssue("error","TRANSMISSION_CYCLE",node,"Ciclo detectado na cadeia de casos-origem.","Revisar vínculos; uma cadeia temporal não deve formar ciclo."))
+    structured=exposures or []
+    exposure_ids:set[str]=set()
+    row_by_id={_text(r.get("identificador")):r for r in rows if _text(r.get("identificador"))}
+    for exposure in structured:
+        eid=exposure.exposure_id
+        if eid in exposure_ids:
+            issues.append(QualityIssue("error","DUPLICATE_EXPOSURE",eid,"Identificador de exposição duplicado.","Corrigir ou consolidar a exposição antes da análise."))
+        exposure_ids.add(eid)
+
+        if exposure.contact_id not in valid_ids:
+            issues.append(QualityIssue("error","EXPOSURE_UNKNOWN_CONTACT",eid,f"Contato '{exposure.contact_id}' da exposição não localizado.","Vincular a exposição a um contato existente ou corrigir o identificador."))
+        if exposure.source_case_id not in valid_ids and exposure.source_case_id!="Caso índice":
+            issues.append(QualityIssue("warning","EXPOSURE_UNKNOWN_SOURCE",eid,f"Caso-origem '{exposure.source_case_id}' da exposição não localizado.","Cadastrar/localizar o caso-origem ou revisar o vínculo."))
+
+        target=row_by_id.get(exposure.contact_id)
+        if target:
+            onset=_date(target.get("data_inicio_sintomas"))
+            if onset and onset < exposure.start_date:
+                issues.append(QualityIssue("error","ONSET_BEFORE_STRUCTURED_EXPOSURE",eid,"Início dos sintomas do contato é anterior ao início da exposição estruturada.","Revisar datas e vínculo epidemiológico."))
+            legacy=_date(target.get("data_ultimo_contato"))
+            if legacy and legacy != exposure.end_date:
+                issues.append(QualityIssue("warning","LEGACY_EXPOSURE_MISMATCH",eid,f"Campo legado de última exposição ({legacy.isoformat()}) difere do fim da exposição estruturada ({exposure.end_date.isoformat()}).","Confirmar o histórico; a V17 usa o histórico estruturado como fonte preferencial."))
+
+        source_row=row_by_id.get(exposure.source_case_id)
+        if source_row:
+            source_onset=_date(source_row.get("data_inicio_sintomas"))
+            if source_onset and exposure.end_date < source_onset:
+                issues.append(QualityIssue("warning","EXPOSURE_BEFORE_SOURCE_ONSET",eid,"Exposição terminou antes do início de sintomas registrado do caso-origem.","Revisar vínculo e datas; este achado não confirma nem exclui transmissão isoladamente."))
+
     issues=_dedupe(issues)
 
     penalty=sum(20 if x.severity=="error" else 8 for x in issues)
