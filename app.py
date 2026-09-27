@@ -1269,6 +1269,13 @@ def render_command_center(contacts_df: pd.DataFrame, exposures: list[Exposure]) 
     if summary.symptomatic_or_suspected: attention.append(f"{summary.symptomatic_or_suspected} contato(s) sintomático(s)/suspeito(s)")
     if attention: st.warning("Revisão operacional prioritária:\n\n- "+"\n- ".join(attention))
     else: st.success("Nenhuma pendência agregada identificada pelos motores V17.")
+    if summary.promotion_allowed:
+        st.success("Quality gate: sem bloqueadores estruturais para promoção técnica HML/PRD.")
+    else:
+        st.error(
+            f"Quality gate BLOQUEADO: {summary.blocking_issues} erro(s) estrutural(is). "
+            f"Códigos: {', '.join(summary.blocking_codes)}. Corrigir ou documentar justificativa antes de HML/PRD."
+        )
     st.caption("Visão executiva derivada dos módulos V17; não substitui classificação, avaliação clínica ou decisão sanitária.")
 
 
