@@ -21,3 +21,18 @@ def test_audit_entry_keeps_event_scope():
     entry = create_audit_entry(event, "snapshot_created", "event", event.event_id)
     assert entry.event_id == event.event_id
     assert entry.action == "snapshot_created"
+
+
+def test_snapshot_payload_can_preserve_structured_exposures():
+    event=OutbreakEvent(event_id="EV-EXP",name="Evento exposições",jurisdiction="MT")
+    payload={
+        "contacts":[{"identificador":"C1"}],
+        "exposures":[{
+            "exposure_id":"EXP-1","event_id":"EV-EXP","contact_id":"C1","source_case_id":"INDEX",
+            "start_date":"2026-09-01","end_date":"2026-09-02","exposure_type":"Domiciliar",
+            "location":"Cuiabá","notes":"registro estruturado",
+        }],
+    }
+    snapshot=build_event_snapshot(event,payload,snapshot_version=1)
+    assert snapshot.payload["exposures"][0]["exposure_id"]=="EXP-1"
+    assert snapshot.payload["exposures"][0]["contact_id"]=="C1"
