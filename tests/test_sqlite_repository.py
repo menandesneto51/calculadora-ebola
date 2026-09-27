@@ -89,3 +89,45 @@ def test_snapshot_version_advances_only_after_snapshot_is_persisted(tmp_path: Pa
     snapshot=build_event_snapshot(event,{"contacts":[],"exposures":[]},snapshot_version=1)
     repo.save_snapshot(snapshot)
     assert repo.next_snapshot_version("EV-SNAP")==2
+
+
+def test_full_investigation_round_trip_event_contacts_exposures_snapshot(tmp_path: Path):
+    from src.domain.exposure import Exposure
+    repo=SQLiteEventRepository(tmp_path/"ebola.db")
+    repo.migrate()
+    event=OutbreakEvent("EV-ROUND","Investigação round-trip","MT",status="active")
+    contacts=[
+        {"identificador":"C1","caso_origem":"Caso índice","data_ultimo_contato":date(2026,9,5),
+         "tipo_contato":"Contato domiciliar","evolucao":"Em monitoramento"},
+    ]
+    exposures=[
+        Exposure("E1","EV-ROUND","C1","Caso índice",date(2026,9,1),date(2026,9,2),"Domiciliar"),
+        Exposure("E2","EV-ROUND","C1","Caso índice",date(2026,9,4),date(2026,9,5),"Cuidado direto"),
+    ]
+    payload={
+        "contacts":contacts,
+        "exposures":[{
+            "exposure_id":x.exposure_id,"event_id":x.event_id,"contact_id":x.contact_id,
+            "source_case_id":x.source_case_id,"start_date":x.start_date.isoformat(),
+            "end_date":x.end_date.isoformat(),"exposure_type":x.exposure_type,
+            "location":x.location,"notes":x.notes,
+        } for x in exposures],
+    }
+    repo.upsert_event(event)
+    repo.replace_contacts(event.event_id,contacts)
+    repo.replace_exposures(event.event_id,exposures)
+    snapshot=build_event_snapshot(event,payload,snapshot_version=repo.next_snapshot_version(event.event_id))
+    repo.save_snapshot(snapshot)
+
+    reopened_event=repo.get_event(event.event_id)
+    reopened_contacts=repo.load_contacts(event.event_id)
+    reopened_exposures=repo.load_exposures(event.event_id)
+    reopened_snapshots=repo.list_snapshots(event.event_id)
+
+    assert reopened_event["status"]=="active"
+    assert reopened_contacts[0]["contact_id"]=="C1"
+    assert [x["exposure_id"] for x in reopened_exposures]==["E1","E2"]
+    assert reopened_exposures[-1]["end_date"]=="2026-09-05"
+    assert reopened_snapshots[0]["snapshot_version"]==1
+    assert reopened_snapshots[0]["checksum_sha256"]==snapshot.checksum_sha256
+    assert repo.next_snapshot_version(event.event_id)==2
