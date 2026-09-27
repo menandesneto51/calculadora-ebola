@@ -1334,10 +1334,10 @@ def render_epidemiological_timeline(contacts_df: pd.DataFrame, exposures: list[E
             st.dataframe(pd.DataFrame(all_rows),use_container_width=True,hide_index=True)
 
 
-def render_temporal_chain_analysis(contacts_df: pd.DataFrame) -> None:
+def render_temporal_chain_analysis(contacts_df: pd.DataFrame, exposures: list[Exposure]) -> None:
     st.subheader("7. Análise temporal da cadeia — V17")
     rows=contacts_df.where(pd.notna(contacts_df),None).to_dict(orient="records")
-    links=analyze_temporal_chain(rows)
+    links=analyze_temporal_chain(rows, exposures, EpidemiologyParameters())
     if not links:
         st.info("Ainda não há vínculos entre contatos suficientes para análise temporal.")
         return
@@ -1345,7 +1345,13 @@ def render_temporal_chain_analysis(contacts_df: pd.DataFrame) -> None:
     data=pd.DataFrame([{
         "caso-origem":x.source_id,
         "contato/caso":x.target_id,
-        "compatibilidade":x.compatibility,
+        "compatibilidade global":x.compatibility,
+        "compatibilidade infectividade":x.infectiousness_compatibility,
+        "compatibilidade incubação":x.incubation_compatibility,
+        "exposição inicial":x.exposure_start,
+        "exposição final":x.exposure_end,
+        "incubação mínima possível (dias)":x.incubation_min_days,
+        "incubação máxima possível (dias)":x.incubation_max_days,
         "geração topológica":x.generation,
         "intervalo entre sintomas (dias)":x.serial_interval_days,
         "fundamentação":x.rationale,
@@ -2750,7 +2756,7 @@ def main() -> None:
         render_epidemiological_timeline(effective_contacts_df, exposures)
         st.divider()
 
-        render_temporal_chain_analysis(effective_contacts_df)
+        render_temporal_chain_analysis(effective_contacts_df, exposures)
         st.divider()
 
         render_contacts_analysis(effective_contacts_df, case, params)
